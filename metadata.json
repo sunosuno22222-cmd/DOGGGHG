@@ -1,0 +1,6 @@
+{
+  "name": "Aph Bot Manager",
+  "description": "Sistema de gerenciamento de servidores Discord com painel web, OAuth2 e organização estrutural via bot.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

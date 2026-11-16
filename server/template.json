@@ -1,0 +1,329 @@
+{
+  "templates": {
+    "dog": {
+      "id": "dog",
+      "categories": [
+        {
+          "name": "━━ 𝟘𝟘𝟙 † 𝗥𝗘𝗖𝗘𝗣𝗖̧𝗔̃𝗢 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗘𝗡𝗧𝗥𝗔𝗗𝗔 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Boas-vindas automáticas aos novos membros do servidor."
+            },
+            {
+              "name": "⌗ ．𝗦𝗔𝗜𝗗𝗔 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Registro automático de saída dos membros."
+            },
+            {
+              "name": "⌗ ．𝗥𝗘𝗚𝗥𝗔𝗦 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Leia todas as regras do servidor antes de participar."
+            },
+            {
+              "name": "⌗ ．𝗔𝗩𝗜𝗦𝗢𝗦 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Comunicados e atualizações importantes da administração."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟚 † 𝗖𝗢𝗠𝗨𝗡𝗜𝗗𝗔𝗗𝗘 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗖𝗛𝗔𝗧-𝗚𝗘𝗥𝗔𝗟 𓂃 †",
+              "type": "text",
+              "topic": "Bate-papo principal do servidor. Respeite os membros."
+            },
+            {
+              "name": "⌗ ．𝗦𝗠𝗦 𓂃 †",
+              "type": "text"
+            },
+            {
+              "name": "⌗ ．𝗠𝗜𝗗𝗜𝗔 𓂃 †",
+              "type": "text",
+              "topic": "Compartilhe fotos, vídeos, memes e clipes."
+            },
+            {
+              "name": "⌗ ．𝗣𝗟𝗔𝗤𝗨𝗜𝗡𝗛𝗔 𓂃 †",
+              "type": "text",
+              "topic": "Envie e divulgue suas plaquinhas."
+            },
+            {
+              "name": "⌗ ．𝗖𝗢𝗠𝗔𝗡𝗗𝗢𝗦 𓂃 †",
+              "type": "text",
+              "topic": "Use os comandos do bot aqui (ex.: /beijar, /ping, /kitar)."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟛 † 𝗠𝗨𝗥𝗔𝗟 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗠𝗨𝗥𝗔𝗟-𝗩𝗘𝗥𝗚𝗢𝗡𝗛𝗔 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Mural oficial aprovado pela administração."
+            },
+            {
+              "name": "⌗ ．𝗣𝗘𝗗𝗜𝗥-𝗠𝗨𝗥𝗔𝗟 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Clique no botão abaixo para enviar um pedido de mural aos administradores."
+            },
+            {
+              "name": "⌗ ．𝗖𝗛𝗢𝗥𝗔𝗥 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Clique no botão abaixo para pedir recurso e solicitar remoção de um mural."
+            },
+            {
+              "name": "⌗ ．𝗘𝗫𝗣 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Clique em EXPONHA UMA OCORRÊNCIA para enviar um relato com evidências para análise administrativa."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟜 † 𝗦𝗨𝗣𝗢𝗥𝗧𝗘 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗦𝗨𝗣𝗢𝗥𝗧𝗘-𝗜𝗡𝗙𝗘𝗥𝗡𝗔𝗟 𓂃 †",
+              "type": "text",
+              "topic": "Atendimento prioritário e suporte da equipe."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟝 † 𝗖𝗔𝗟𝗟𝗦 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟 𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟 𝗜𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟 𝗜𝗜𝗜 𓂃 †", "type": "voice" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟞 † 𝗚𝗙 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗚𝗙 𝗜 𓂃 †", "type": "voice", "userLimit": 2 },
+            { "name": "⌗ ．𝗚𝗙 𝗜𝗜 𓂃 †", "type": "voice", "userLimit": 2 },
+            { "name": "⌗ ．𝗚𝗙 𝗜𝗜𝗜 𓂃 †", "type": "voice", "userLimit": 4 }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟟 † 𝗠𝗨𝗦𝗜𝗖𝗔 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗠𝗨𝗦𝗜𝗖𝗔 𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗠𝗨𝗦𝗜𝗖𝗔 𝗜𝗜 𓂃 †", "type": "voice" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟠 † 𝗔𝗙𝗞 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗔𝗙𝗞 𝗜 𓂃 †", "type": "voice" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟡 † 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗖̧𝗔̃𝗢 ━━",
+          "adminOnly": true,
+          "channels": [
+            {
+              "name": "⌗ ．𝗦𝗧𝗔𝗙𝗙-𝗖𝗛𝗔𝗧 𓂃 †",
+              "type": "text",
+              "topic": "Canal privado da administração."
+            },
+            {
+              "name": "⌗ ．𝗖𝗢𝗠𝗔𝗡𝗗𝗢𝗦-𝗔𝗗𝗠 𓂃 †",
+              "type": "text",
+              "topic": "Canal privado para comandos administrativos (/lock, /unlock, /nuke, /excluir-mensagens, /aph)."
+            },
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟-𝗦𝗧𝗔𝗙𝗙 𓂃 †", "type": "voice" }
+          ]
+        }
+      ]
+    },
+    "dogs1": {
+      "id": "dogs1",
+      "categories": [
+        {
+          "name": "━━ 𝟘𝟘𝟙 † 𝗥𝗘𝗖𝗘𝗣𝗖̧𝗔̃𝗢 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗘𝗡𝗧𝗥𝗔𝗗𝗔 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Boas-vindas automáticas aos novos membros do servidor."
+            },
+            {
+              "name": "⌗ ．𝗦𝗔𝗜𝗗𝗔 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Registro automático de saída dos membros."
+            },
+            {
+              "name": "⌗ ．𝗥𝗘𝗚𝗥𝗔𝗦 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Leia todas as regras do servidor antes de participar."
+            },
+            {
+              "name": "⌗ ．𝗔𝗩𝗜𝗦𝗢𝗦 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Comunicados e atualizações importantes da administração."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟚 † 𝗖𝗢𝗠𝗨𝗡𝗜𝗗𝗔𝗗𝗘 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗖𝗛𝗔𝗧-𝗚𝗘𝗥𝗔𝗟 𓂃 †",
+              "type": "text",
+              "topic": "Bate-papo principal do servidor. Respeite os membros."
+            },
+            {
+              "name": "⌗ ．𝗠𝗜𝗗𝗜𝗔 𓂃 †",
+              "type": "text",
+              "topic": "Compartilhe fotos, vídeos, memes e clipes."
+            },
+            {
+              "name": "⌗ ．𝗣𝗟𝗔𝗤𝗨𝗜𝗡𝗛𝗔 𓂃 †",
+              "type": "text",
+              "topic": "Envie e divulgue suas plaquinhas."
+            },
+            {
+              "name": "⌗ ．𝗖𝗢𝗠𝗔𝗡𝗗𝗢𝗦 𓂃 †",
+              "type": "text",
+              "topic": "Use os comandos do bot aqui (ex.: /beijar, /ping, /kitar)."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟛 † 𝗠𝗨𝗥𝗔𝗟 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗠𝗨𝗥𝗔𝗟-𝗩𝗘𝗥𝗚𝗢𝗡𝗛𝗔 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Mural oficial aprovado pela administração."
+            },
+            {
+              "name": "⌗ ．𝗣𝗘𝗗𝗜𝗥-𝗠𝗨𝗥𝗔𝗟 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Clique no botão abaixo para enviar um pedido de mural aos administradores."
+            },
+            {
+              "name": "⌗ ．𝗖𝗛𝗢𝗥𝗔𝗥 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Clique no botão abaixo para pedir recurso e solicitar remoção de um mural."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟜 † 𝗦𝗘𝗥𝗩𝗜𝗖̧𝗢𝗦 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗦𝗠𝗦 𓂃 †", "type": "text" },
+            {
+              "name": "⌗ ．𝗘𝗫𝗣 𓂃 †",
+              "type": "text",
+              "readOnly": true,
+              "topic": "Clique em EXPONHA UMA OCORRÊNCIA para enviar um relato com evidências para análise administrativa."
+            },
+            {
+              "name": "⌗ ．𝗣𝗘𝗗𝗜𝗥-𝗦𝗘𝗥𝗩𝗜𝗖𝗢 𓂃 †",
+              "type": "text",
+              "topic": "Solicite serviços e atendimentos disponíveis."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟝 † 𝗖𝗢𝗡𝗦𝗨𝗟𝗧𝗔𝗦 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗕𝗨𝗦𝗖𝗔-𝗜𝗣 𓂃 †", "type": "text" },
+            { "name": "⌗ ．𝗕𝗨𝗦𝗖𝗔-𝗡𝗨𝗠𝗘𝗥𝗢 𓂃 †", "type": "text" },
+            { "name": "⌗ ．𝗣𝗨𝗫𝗔𝗥-𝗗𝗔𝗗𝗢𝗦 𓂃 †", "type": "text" },
+            { "name": "⌗ ．𝗘𝗫𝗣𝗟𝗔𝗡𝗔𝗥-𝗗𝗔𝗗𝗢𝗦 𓂃 †", "type": "text" },
+            { "name": "⌗ ．𝗣𝗘𝗗𝗜𝗥-𝗗𝗔𝗗𝗢𝗦 𓂃 †", "type": "text" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟞 † 𝗦𝗨𝗣𝗢𝗥𝗧𝗘 ━━",
+          "channels": [
+            {
+              "name": "⌗ ．𝗣𝗘𝗗𝗜𝗥-𝗔𝗝𝗨𝗗𝗔 𓂃 †",
+              "type": "text",
+              "topic": "Tire dúvidas com a comunidade ou equipe."
+            },
+            {
+              "name": "⌗ ．𝗖𝗛𝗔𝗠𝗔𝗥-𝗔𝗗𝗠 𓂃 †",
+              "type": "text",
+              "topic": "Chame um administrador quando precisar de suporte direto."
+            },
+            {
+              "name": "⌗ ．𝗦𝗨𝗣𝗢𝗥𝗧𝗘-𝗜𝗡𝗙𝗘𝗥𝗡𝗔𝗟 𓂃 †",
+              "type": "text",
+              "topic": "Atendimento prioritário e suporte da equipe."
+            }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟟 † 𝗖𝗔𝗟𝗟𝗦 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟 𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟 𝗜𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟 𝗜𝗜𝗜 𓂃 †", "type": "voice" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟠 † 𝗚𝗙 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗚𝗙 𝗜 𓂃 †", "type": "voice", "userLimit": 2 },
+            { "name": "⌗ ．𝗚𝗙 𝗜𝗜 𓂃 †", "type": "voice", "userLimit": 2 },
+            { "name": "⌗ ．𝗚𝗙 𝗜𝗜𝗜 𓂃 †", "type": "voice", "userLimit": 4 }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟘𝟡 † 𝗠𝗨𝗦𝗜𝗖𝗔 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗠𝗨𝗦𝗜𝗖𝗔 𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗠𝗨𝗦𝗜𝗖𝗔 𝗜𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗠𝗨𝗦𝗜𝗖𝗔 𝗜𝗜𝗜 𓂃 †", "type": "voice" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟙𝟘 † 𝗔𝗙𝗞 ━━",
+          "channels": [
+            { "name": "⌗ ．𝗔𝗙𝗞 𝗜 𓂃 †", "type": "voice" },
+            { "name": "⌗ ．𝗔𝗙𝗞 𝗜𝗜 𓂃 †", "type": "voice" }
+          ]
+        },
+        {
+          "name": "━━ 𝟘𝟙𝟙 † 𝗔𝗗𝗠𝗜𝗡𝗜𝗦𝗧𝗥𝗔𝗖̧𝗔̃𝗢 ━━",
+          "adminOnly": true,
+          "channels": [
+            {
+              "name": "⌗ ．𝗦𝗧𝗔𝗙𝗙-𝗖𝗛𝗔𝗧 𓂃 †",
+              "type": "text",
+              "topic": "Canal privado da administração."
+            },
+            {
+              "name": "⌗ ．𝗖𝗢𝗠𝗔𝗡𝗗𝗢𝗦-𝗔𝗗𝗠 𓂃 †",
+              "type": "text",
+              "topic": "Canal privado para comandos administrativos (/lock, /unlock, /nuke, /excluir-mensagens, /aph)."
+            },
+            { "name": "⌗ ．𝗖𝗔𝗟𝗟-𝗦𝗧𝗔𝗙𝗙 𓂃 †", "type": "voice" }
+          ]
+        }
+      ]
+    }
+  }
+}
