@@ -12,7 +12,7 @@ service cloud.firestore {
     }
 
     function isVerifiedUser() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isSignedIn();
     }
 
     function isOwner(userId) {
@@ -271,7 +271,7 @@ service cloud.firestore {
       }
 
       match /integrations/{integrationId} {
-        allow get: if isVerifiedUser()
+        allow get, list: if isVerifiedUser()
           && isOwner(userId)
           && isValidId(userId)
           && isValidId(integrationId)

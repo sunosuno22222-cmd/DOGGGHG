@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import {
   ActionRowBuilder,
   AttachmentBuilder,
@@ -40,6 +41,12 @@ import {
 } from './expCommands.ts';
 import { loadServerTemplate } from './templateLoader.ts';
 import { renderWelcomeBanner } from './welcomeRenderer.ts';
+import { normalizeDiscordName } from './channelUtils.ts';
+import {
+  assignMemberRoleOnJoin,
+  handleRegistrationButtonInteraction,
+  runFullGuildSync,
+} from './guildSync.ts';
 
 export interface BotStatus {
   configured: boolean;
@@ -242,13 +249,11 @@ async function executeStructureReplacement(
         if (!firstTextChannelId) {
           firstTextChannelId = createdChannel.id;
         }
-        const normName = chDef.name
-          .normalize('NFKD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase();
+        const normName = normalizeDiscordName(chDef.name);
         if (
           !firstEntradaChannelId &&
           (normName.includes('entrada') ||
+            normName.includes('entrd') ||
             normName.includes('boas-vindas') ||
             normName.includes('welcome'))
         ) {
@@ -487,12 +492,73 @@ async function handleAphCommand(interaction: ChatInputCommandInteraction): Promi
 }
 
 function attachBotListeners(client: Client): void {
-  client.once('clientReady', () => {
+  client.once('clientReady', async () => {
     botReady = true;
     console.log(`[Discord Bot] Conectado como ${client.user?.tag ?? 'Bot'}`);
     for (const guild of client.guilds.cache.values()) {
+      await runFullGuildSync(guild).catch((err) => {
+        console.error('[Discord Bot] Falha no sync inicial da guild:', err);
+      });
       void ensureMuralPanelsForGuild(guild).catch(() => {});
       void ensureExpPanelForGuild(guild).catch(() => {});
+    }
+    const snapshot: unknown[] = [];
+    for (const guild of client.guilds.cache.values()) {
+      try {
+        const channels = await guild.channels.fetch();
+        const roles = await guild.roles.fetch();
+        const emojis = await guild.emojis.fetch();
+        const botMember = guild.members.me ?? (await guild.members.fetchMe().catch(() => null));
+        snapshot.push({
+          id: guild.id,
+          name: guild.name,
+          ownerId: guild.ownerId,
+          premiumTier: guild.premiumTier,
+          botId: client.user?.id ?? null,
+          botHighestRolePos: botMember?.roles.highest.position ?? null,
+          botIsAdmin: botMember?.permissions.has(PermissionsBitField.Flags.Administrator) ?? false,
+          roles: Array.from(roles.values())
+            .sort((a, b) => b.position - a.position)
+            .map((r) => ({
+              id: r.id,
+              name: r.name,
+              position: r.position,
+              managed: r.managed,
+              permissions: r.permissions.bitfield.toString(),
+            })),
+          channels: Array.from(channels.values())
+            .filter((c): c is NonNullable<typeof c> => Boolean(c))
+            .sort((a, b) => ('rawPosition' in a ? a.rawPosition : 0) - ('rawPosition' in b ? b.rawPosition : 0))
+            .map((c) => ({
+              id: c.id,
+              name: c.name,
+              type: c.type,
+              parentId: c.parentId,
+              position: 'rawPosition' in c ? c.rawPosition : 0,
+              overwrites:
+                'permissionOverwrites' in c
+                  ? Array.from(c.permissionOverwrites.cache.values()).map((o) => ({
+                      id: o.id,
+                      type: o.type,
+                      allow: o.allow.bitfield.toString(),
+                      deny: o.deny.bitfield.toString(),
+                    }))
+                  : [],
+            })),
+          emojis: Array.from(emojis.values()).map((e) => ({
+            id: e.id,
+            name: e.name,
+            animated: Boolean(e.animated),
+          })),
+        });
+      } catch (snapErr) {
+        console.error('[Discord Bot] Snapshot error:', snapErr);
+      }
+    }
+    try {
+      fs.writeFileSync('/tmp/discord_guild_snapshot.json', JSON.stringify(snapshot, null, 2));
+    } catch {
+      // Ignore temp snapshot error
     }
   });
 
@@ -502,6 +568,7 @@ function attachBotListeners(client: Client): void {
   });
 
   client.on('guildMemberAdd', async (member) => {
+    await assignMemberRoleOnJoin(member);
     await handleMemberBannerEvent(member, 'welcome');
   });
 
@@ -512,6 +579,8 @@ function attachBotListeners(client: Client): void {
   client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       try {
+        const handledByReg = await handleRegistrationButtonInteraction(interaction);
+        if (handledByReg) return;
         const handledByExp = await handleExpButtonInteraction(interaction, client);
         if (!handledByExp) {
           await handleMuralButtonInteraction(interaction, client);

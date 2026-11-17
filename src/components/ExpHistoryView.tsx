@@ -13,13 +13,20 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
-import type { ExpFormat, ExpRecordView, ExpRecordsResponse, ExpStatus } from '../types';
+import type {
+  ExpFormat,
+  ExpRecordView,
+  ExpRecordsResponse,
+  ExpStatus,
+  TikTokAccountInfo,
+} from '../types';
 
 interface ExpHistoryViewProps {
   records: ExpRecordView[];
   nextExpCode: string;
   loading: boolean;
   tiktokConnected: boolean;
+  tiktokAccounts?: TikTokAccountInfo[];
   embeddedInServerPanel?: boolean;
   fixedGuildId?: string;
   onRefresh: () => void;
@@ -116,6 +123,7 @@ export function ExpHistoryView({
   nextExpCode,
   loading,
   tiktokConnected,
+  tiktokAccounts,
   embeddedInServerPanel = false,
   fixedGuildId,
   onRefresh,
@@ -125,9 +133,19 @@ export function ExpHistoryView({
 }: ExpHistoryViewProps) {
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null,
   );
+
+  useEffect(() => {
+    if (tiktokAccounts && tiktokAccounts.length > 0 && !selectedAccountId) {
+      const def = tiktokAccounts.find((a) => a.isDefault) || tiktokAccounts[0];
+      if (def?.id) {
+        setSelectedAccountId(def.id);
+      }
+    }
+  }, [tiktokAccounts, selectedAccountId]);
 
   // Interactive preview workbench state
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -167,7 +185,7 @@ export function ExpHistoryView({
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode }),
+            body: JSON.stringify({ mode, accountId: selectedAccountId || undefined }),
           },
         );
         const data = (await resp.json().catch(() => ({}))) as {
@@ -632,6 +650,22 @@ export function ExpHistoryView({
                       rec.status !== 'published_tiktok' &&
                       rec.status !== 'tiktok_inbox' && (
                         <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {tiktokAccounts && tiktokAccounts.length > 1 && (
+                            <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1">
+                              <span className="font-semibold text-slate-700">Conta:</span>
+                              <select
+                                value={selectedAccountId}
+                                onChange={(e) => setSelectedAccountId(e.target.value)}
+                                className="bg-transparent text-xs font-medium text-slate-900 focus:outline-none cursor-pointer"
+                              >
+                                {tiktokAccounts.map((acc) => (
+                                  <option key={acc.id} value={acc.id}>
+                                    @{acc.username} {acc.isDefault ? '(Padrão)' : ''}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                           {rec.status === 'awaiting_tiktok_confirmation' ? (
                             <>
                               <button

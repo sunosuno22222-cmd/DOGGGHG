@@ -59,12 +59,17 @@ export interface GuildWelcomeConfigResponse {
 }
 
 export interface TikTokAccountInfo {
+  id: string;
+  accountKey: string;
   openId: string;
   username: string;
   displayName: string;
   avatarUrl: string | null;
   provider?: 'autotok' | 'webhook' | 'online_service';
+  isDefault?: boolean;
   connectedAt: string;
+  updatedAt?: string;
+  status?: 'active' | 'expired' | 'checking';
 }
 
 export interface TikTokStatusResponse {
@@ -72,6 +77,8 @@ export interface TikTokStatusResponse {
   connected: boolean;
   provider?: 'autotok' | 'webhook' | 'online_service';
   account: TikTokAccountInfo | null;
+  accounts?: TikTokAccountInfo[];
+  activeAccountId?: string | null;
   encryptedBackup?: string | null;
 }
 

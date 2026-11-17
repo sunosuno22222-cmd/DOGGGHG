@@ -1,13 +1,65 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import {
+  doc,
+  enableNetwork,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  type Firestore,
+} from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 const app = initializeApp(firebaseConfig);
 
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+function createFirestoreInstance(): Firestore {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        experimentalForceLongPolling: true,
+      },
+      firebaseConfig.firestoreDatabaseId,
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreInstance();
 export const auth = getAuth(app);
 export const googleAuthProvider = new GoogleAuthProvider();
+
+export function isOfflineFirestoreError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === 'unavailable' ||
+    msg.includes('the client is offline') ||
+    msg.includes('could not reach cloud firestore backend')
+  );
+}
+
+export async function ensureFirestoreOnline(): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return;
+  }
+  await enableNetwork(db).catch(() => {});
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    void enableNetwork(db).catch(() => {});
+  });
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        void enableNetwork(db).catch(() => {});
+      }
+    });
+  }
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -72,3 +124,4 @@ async function testConnection(): Promise<void> {
 }
 
 void testConnection();
+

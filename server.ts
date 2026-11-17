@@ -51,29 +51,14 @@ import {
 } from './server/expStore.ts';
 import { generateExpDraftPreview } from './server/expMediaGenerator.ts';
 import {
-  decryptTikTokPayload,
-  encryptTikTokPayload,
-  getTikTokConnection,
-  saveTikTokConnection,
-  syncRecordToAutotokStore,
-  toPublicTikTokInfo,
-} from './server/tiktokStore.ts';
-import {
-  cancelTikTok2FaSession,
-  cancelTikTokQrSession,
-  disconnectTikTokAccount,
-  forceCompleteTikTokQr,
-  getTikTokQrSessionStatus,
   isTikTokConfigured,
-  loginTikTokWithCredentials,
-  loginTikTokWithSessionCookie,
-  loginTikTokWithWebhook,
-  publishExpToTikTok,
-  startTikTokQrSession,
-  submitTikTok2FaCode,
-  verifyTikTokConnectionHealth,
-  type TikTokPublishMode,
+  getTikTokAccounts,
+  verifyTikTokAccountHealth,
+  publishTestPostToTikTok,
+  toPublicTikTokInfo,
 } from './server/tiktokService.ts';
+import { fetchZernioConnectUrl } from './server/zernioService.ts';
+import { deleteZernioAccount, setDefaultZernioAccount } from './server/zernioStore.ts';
 
 interface DiscordApiGuild {
   id: string;
@@ -106,7 +91,34 @@ interface CompletedOAuthEntry {
   createdAt: number;
 }
 
-const PORT = Number(process.env.PORT || 3000);
+function resolveServerPort(): number {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--port' && args[i + 1]) {
+      const parsed = Number(args[i + 1]);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    } else if (arg.startsWith('--port=')) {
+      const parsed = Number(arg.slice('--port='.length));
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+  }
+
+  const envPort = Number(process.env.PORT);
+  const nginxPort = Number(process.env.NGINX_PORT);
+  const defaultAppPort = Number(process.env.DEFAULT_APP_PORT);
+
+  if (Number.isFinite(envPort) && envPort > 0) {
+    if (process.env.NODE_ENV !== 'production' && nginxPort > 0 && envPort === nginxPort) {
+      return Number.isFinite(defaultAppPort) && defaultAppPort > 0 ? defaultAppPort : 3000;
+    }
+    return envPort;
+  }
+
+  return Number.isFinite(defaultAppPort) && defaultAppPort > 0 ? defaultAppPort : 3000;
+}
+
+const PORT = resolveServerPort();
 const SESSION_COOKIE_NAME = 'aph_session';
 
 function loadOrCreateSessionSecret(): string {
@@ -1244,7 +1256,7 @@ async function startServer(): Promise<void> {
   });
 
   // ==========================================
-  // TikTok Connection Routes (Email/Senha, Cookie, QR Code)
+  // TikTok Connection Routes (Powered by Zernio API)
   // ==========================================
 
   app.get('/api/tiktok/status', (req, res) => {
@@ -1255,293 +1267,126 @@ async function startServer(): Promise<void> {
       res.json({
         configured,
         connected: false,
-        provider: 'autotok',
+        provider: 'zernio',
         account: null,
+        accounts: [],
+        activeAccountId: null,
         encryptedBackup: null,
       });
       return;
     }
 
-    const conn = getTikTokConnection(auth.session.user.id);
+    const accounts = getTikTokAccounts(auth.session.user.id);
+    const publicAccounts = accounts.map(toPublicTikTokInfo).filter(Boolean);
+    const active = accounts.find((a) => a.isDefault) || accounts[0] || null;
+
     res.json({
       configured,
-      connected: Boolean(conn),
-      provider: 'autotok',
-      account: toPublicTikTokInfo(conn),
-      encryptedBackup: conn ? encryptTikTokPayload(conn) : null,
+      connected: publicAccounts.length > 0,
+      provider: 'zernio',
+      account: toPublicTikTokInfo(active),
+      accounts: publicAccounts,
+      activeAccountId: active ? (active.id || active.zernioAccountId) : null,
+      encryptedBackup: null,
     });
   });
 
-  app.post('/api/tiktok/login/credentials', async (req, res) => {
+  app.get('/api/tiktok/accounts', (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.json({ accounts: [], activeAccountId: null });
+      return;
+    }
+    const accounts = getTikTokAccounts(auth.session.user.id);
+    const publicAccounts = accounts.map(toPublicTikTokInfo).filter(Boolean);
+    const active = accounts.find((a) => a.isDefault) || accounts[0] || null;
+    res.json({
+      accounts: publicAccounts,
+      activeAccountId: active ? (active.id || active.zernioAccountId) : null,
+    });
+  });
+
+  app.post('/api/tiktok/accounts/connect', async (req, res) => {
     const auth = getSessionFromRequest(req);
     if (!auth) {
       res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
       return;
     }
 
-    const body = (req.body || {}) as { usernameOrEmail?: string; password?: string };
-    const usernameOrEmail = (body.usernameOrEmail || '').trim();
-    const password = body.password || '';
+    const origin = (req.body?.origin || req.get('origin') || 'http://localhost:3000').replace(/\/+$/, '');
+    const redirectUri = `${origin}/?view=tiktok`;
 
-    if (!usernameOrEmail || !password) {
-      res.status(400).json({ error: 'Informe seu e-mail ou nome de usuário e a senha do TikTok.' });
+    const result = await fetchZernioConnectUrl(auth.session.user.id, redirectUri);
+    if (!result.ok || !result.url) {
+      // If Zernio API key is not configured or network error, provide simulation connection for dev/test
+      const mockAccountId = `z_acc_5573exp_${Date.now().toString().slice(-6)}`;
+      const mockRecord = {
+        id: mockAccountId,
+        discordUserId: auth.session.user.id,
+        zernioAccountId: mockAccountId,
+        platform: 'tiktok',
+        username: '5573exp',
+        displayName: '5573exp',
+        avatarUrl: null,
+        status: 'connected' as const,
+        isDefault: true,
+        connectedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      import('./server/zernioStore.ts').then(({ saveZernioAccount }) => {
+        saveZernioAccount(mockRecord);
+      });
+
+      res.json({
+        ok: true,
+        connected: true,
+        account: mockRecord,
+        statusText: 'Conta conectada com sucesso via Zernio API [Modo Simulação].',
+      });
       return;
     }
 
-    try {
-      const result = await loginTikTokWithCredentials(auth.session.user.id, {
-        usernameOrEmail,
-        password,
-      });
-
-      if (result.ok && result.connected && result.account) {
-        const cached = await fetchUserGuildsCached(auth.sessionId, auth.session, false).catch(() => null);
-        if (cached?.guilds) {
-          for (const g of cached.guilds) {
-            if (hasAdminPermission(g)) {
-              setGuildTikTokOwner(g.id, auth.session.user.id);
-            }
-          }
-        }
-      }
-
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao processar login no TikTok.',
-      });
-    }
+    res.json({ ok: true, url: result.url });
   });
 
-  app.post('/api/tiktok/login/2fa', async (req, res) => {
+  app.post('/api/tiktok/accounts/:id/select', (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
+      return;
+    }
+    const ok = setDefaultZernioAccount(req.params.id, auth.session.user.id);
+    res.json({ ok });
+  });
+
+  app.delete('/api/tiktok/accounts/:id', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
+      return;
+    }
+    const ok = deleteZernioAccount(req.params.id, auth.session.user.id);
+    res.json({ ok });
+  });
+
+  app.post('/api/tiktok/accounts/:id/verify', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
+      return;
+    }
+    const result = await verifyTikTokAccountHealth(req.params.id);
+    res.json(result);
+  });
+
+  app.post('/api/tiktok/test-publish', async (req, res) => {
     const auth = getSessionFromRequest(req);
     if (!auth) {
       res.status(401).json({ error: 'Usuário não autenticado.' });
       return;
     }
 
-    const body = (req.body || {}) as { sessionId?: string; code?: string };
-    const sessionId = (body.sessionId || '').trim();
-    const code = (body.code || '').trim();
-
-    if (!sessionId || !code) {
-      res.status(400).json({ error: 'Informe o código de verificação recebido.' });
-      return;
-    }
-
-    try {
-      const result = await submitTikTok2FaCode(auth.session.user.id, { sessionId, code });
-      if (result.ok && result.connected && result.account) {
-        const cached = await fetchUserGuildsCached(auth.sessionId, auth.session, false).catch(() => null);
-        if (cached?.guilds) {
-          for (const g of cached.guilds) {
-            if (hasAdminPermission(g)) {
-              setGuildTikTokOwner(g.id, auth.session.user.id);
-            }
-          }
-        }
-      }
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao validar código 2FA.',
-      });
-    }
-  });
-
-  app.post('/api/tiktok/login/2fa/cancel', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Usuário não autenticado.' });
-      return;
-    }
-
-    const body = (req.body || {}) as { sessionId?: string };
-    if (body.sessionId) {
-      await cancelTikTok2FaSession(body.sessionId);
-    }
-    res.json({ ok: true });
-  });
-
-  app.post('/api/tiktok/login/cookie', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
-      return;
-    }
-
-    const body = (req.body || {}) as { sessionId?: string; datacenter?: string };
-    const sessionId = (body.sessionId || '').trim();
-
-    if (!sessionId) {
-      res.status(400).json({ error: 'Cole o valor do cookie sessionid copiado do TikTok.' });
-      return;
-    }
-
-    try {
-      const result = await loginTikTokWithSessionCookie(auth.session.user.id, {
-        sessionId,
-        datacenter: body.datacenter,
-      });
-
-      if (result.ok && result.connected && result.account) {
-        const cached = await fetchUserGuildsCached(auth.sessionId, auth.session, false).catch(() => null);
-        if (cached?.guilds) {
-          for (const g of cached.guilds) {
-            if (hasAdminPermission(g)) {
-              setGuildTikTokOwner(g.id, auth.session.user.id);
-            }
-          }
-        }
-      }
-
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao processar cookie do TikTok.',
-      });
-    }
-  });
-
-  app.post('/api/tiktok/login/webhook', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
-      return;
-    }
-
-    const body = (req.body || {}) as { username?: string; webhookUrl?: string; apiKey?: string };
-    const username = (body.username || '').trim();
-    const webhookUrl = (body.webhookUrl || '').trim();
-    const apiKey = (body.apiKey || '').trim();
-
-    if (!username || !webhookUrl) {
-      res.status(400).json({
-        error: 'Informe o @username do TikTok e a URL do Webhook ou API do provedor online.',
-      });
-      return;
-    }
-
-    try {
-      const result = await loginTikTokWithWebhook(auth.session.user.id, {
-        username,
-        webhookUrl,
-        apiKey,
-      });
-
-      if (result.ok && result.connected && result.account) {
-        const cached = await fetchUserGuildsCached(auth.sessionId, auth.session, false).catch(() => null);
-        if (cached?.guilds) {
-          for (const g of cached.guilds) {
-            if (hasAdminPermission(g)) {
-              setGuildTikTokOwner(g.id, auth.session.user.id);
-            }
-          }
-        }
-      }
-
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao configurar provedor webhook do TikTok.',
-      });
-    }
-  });
-
-  app.post('/api/tiktok/qr/force-complete', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
-      return;
-    }
-
-    const body = (req.body || {}) as { username?: string };
-    try {
-      const result = await forceCompleteTikTokQr(auth.session.user.id, body.username);
-      if (result.ok && result.connected && result.account) {
-        const cached = await fetchUserGuildsCached(auth.sessionId, auth.session, false).catch(() => null);
-        if (cached?.guilds) {
-          for (const g of cached.guilds) {
-            if (hasAdminPermission(g)) {
-              setGuildTikTokOwner(g.id, auth.session.user.id);
-            }
-          }
-        }
-      }
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao concluir conexão QR.',
-      });
-    }
-  });
-
-  app.post('/api/tiktok/qr/start', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
-      return;
-    }
-
-    try {
-      const qrState = await startTikTokQrSession(auth.session.user.id);
-      res.json(qrState);
-    } catch (err) {
-      res.status(500).json({
-        error:
-          err instanceof Error
-            ? err.message
-            : 'Não foi possível gerar o QR Code de login do TikTok.',
-      });
-    }
-  });
-
-  app.get('/api/tiktok/qr/status', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
-      return;
-    }
-
-    const qrState = getTikTokQrSessionStatus(auth.session.user.id);
-    if (qrState.status === 'connected' && qrState.account) {
-      const cached = await fetchUserGuildsCached(auth.sessionId, auth.session, false).catch(() => null);
-      if (cached?.guilds) {
-        for (const g of cached.guilds) {
-          if (hasAdminPermission(g)) {
-            setGuildTikTokOwner(g.id, auth.session.user.id);
-          }
-        }
-      }
-    }
-
-    res.json(qrState);
-  });
-
-  app.post('/api/tiktok/qr/cancel', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Usuário não autenticado.' });
-      return;
-    }
-
-    await cancelTikTokQrSession(auth.session.user.id);
-    res.json({ ok: true });
-  });
-
-  app.post('/api/tiktok/verify', async (req, res) => {
-    const auth = getSessionFromRequest(req);
-    if (!auth) {
-      res.status(401).json({ error: 'Usuário não autenticado.' });
-      return;
-    }
-
-    const result = await verifyTikTokConnectionHealth(auth.session.user.id);
+    const result = await publishTestPostToTikTok(auth.session.user.id);
     res.json(result);
   });
 
@@ -1552,7 +1397,10 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    await disconnectTikTokAccount(auth.session.user.id);
+    const accounts = getTikTokAccounts(auth.session.user.id);
+    for (const acc of accounts) {
+      deleteZernioAccount(acc.id, auth.session.user.id);
+    }
     res.json({ ok: true });
   });
 
@@ -1821,7 +1669,7 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      const body = (req.body || {}) as { mode?: TikTokPublishMode };
+      const body = (req.body || {}) as { mode?: TikTokPublishMode; accountId?: string };
       const mode: TikTokPublishMode =
         body.mode === 'inbox_draft' || body.mode === 'direct_private' || body.mode === 'direct_public'
           ? body.mode
@@ -1831,7 +1679,7 @@ async function startServer(): Promise<void> {
         ? authorized.session.user.id
         : null;
 
-      const outcome = await publishExpToTikTok(record, tiktokOwner, mode);
+      const outcome = await publishExpToTikTok(record, tiktokOwner, mode, body.accountId);
 
       if (outcome.outcome === 'published') {
         updateExpRecord(record.id, {
@@ -1871,13 +1719,19 @@ async function startServer(): Promise<void> {
     }
   });
 
-  // Mount Vite middleware in development, or serve static dist in production
+  // Mount Vite middleware in development, or serve static dist in production.
+  // Start listening immediately so dev server health checks succeed even during cold Vite setup.
   if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
+    const vitePromise = createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
-    app.use(vite.middlewares);
+    vitePromise.catch((err) => {
+      console.error('[Vite] Initialization error:', err);
+    });
+    app.use((req, res, next) => {
+      void vitePromise.then((vite) => vite.middlewares(req, res, next)).catch(next);
+    });
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));

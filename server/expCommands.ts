@@ -43,12 +43,14 @@ import {
 } from './expStore.ts';
 import { publishExpToTikTok } from './tiktokService.ts';
 import { getAnyConnectedTikTok, getTikTokConnection } from './tiktokStore.ts';
+import {
+  findExpChannelInGuild,
+  normalizeDiscordName,
+  toTinyFont,
+} from './channelUtils.ts';
 
 function normalizeChannelName(name: string): string {
-  return name
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
+  return normalizeDiscordName(name);
 }
 
 function isGuildTextOrAnnouncement(
@@ -70,14 +72,7 @@ function isGuildAdmin(
 }
 
 export function findExpChannel(guild: Guild): TextChannel | NewsChannel | null {
-  for (const ch of guild.channels.cache.values()) {
-    if (!isGuildTextOrAnnouncement(ch)) continue;
-    const norm = normalizeChannelName(ch.name);
-    if (/(?:^|[^a-z])exp(?:[^a-z]|$)/.test(norm)) {
-      return ch;
-    }
-  }
-  return null;
+  return findExpChannelInGuild(guild);
 }
 
 async function enforceReadOnlyPermissions(
@@ -177,7 +172,7 @@ export async function ensureExpPanelForGuild(guild: Guild): Promise<void> {
 
     try {
       const created = await guild.channels.create({
-        name: '⌗ ．𝗘𝗫𝗣 𓂃 †',
+        name: toTinyFont('exp'),
         type: ChannelType.GuildText,
         parent: targetParentId,
         topic:

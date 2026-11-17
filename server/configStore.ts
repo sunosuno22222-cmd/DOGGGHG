@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { normalizeDiscordName } from './channelUtils.ts';
 
 export type BannerEventType = 'welcome' | 'leave';
 
@@ -191,10 +192,7 @@ function copyUploadFile(sourceFilename: string | null, targetBasePrefix: string)
 }
 
 function normalizeChannelName(name: string): string {
-  return name
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
+  return normalizeDiscordName(name);
 }
 
 function backupRuleImageForAccount(
@@ -426,7 +424,12 @@ export function restorePresetForUnconfiguredGuild(
     if (eventType === 'welcome') {
       const match = channels.find((ch) => {
         const n = normalizeChannelName(ch.name);
-        return n.includes('entrada') || n.includes('boas-vindas') || n.includes('welcome');
+        return (
+          n.includes('entrada') ||
+          n.includes('entrd') ||
+          n.includes('boas-vindas') ||
+          n.includes('welcome')
+        );
       });
       return match?.id ?? null;
     }

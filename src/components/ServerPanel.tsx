@@ -43,6 +43,7 @@ interface ServerPanelProps {
   nextExpCode?: string;
   expLoading?: boolean;
   tiktokConnected?: boolean;
+  tiktokAccounts?: import('../types').TikTokAccountInfo[];
   onRefreshExp?: () => void;
   onOpenDrawer?: () => void;
   onOpenTikTokSettings?: () => void;
@@ -122,6 +123,7 @@ export function ServerPanel({
   nextExpCode = 'Exp 001',
   expLoading = false,
   tiktokConnected = false,
+  tiktokAccounts = [],
   onRefreshExp,
   onOpenDrawer,
   onOpenTikTokSettings,
@@ -840,6 +842,7 @@ export function ServerPanel({
               nextExpCode={nextExpCode}
               loading={expLoading}
               tiktokConnected={tiktokConnected}
+              tiktokAccounts={tiktokAccounts}
               onRefresh={() => onRefreshExp?.()}
               onOpenTikTokSettings={onOpenTikTokSettings}
             />

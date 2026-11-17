@@ -12,8 +12,29 @@ import {
   where,
 } from 'firebase/firestore';
 import { apiFetch } from './api';
-import { auth, db, googleAuthProvider, handleFirestoreError, OperationType } from './firebase';
+import {
+  auth,
+  db,
+  ensureFirestoreOnline,
+  googleAuthProvider,
+  handleFirestoreError,
+  isOfflineFirestoreError,
+  OperationType,
+} from './firebase';
 import type { BannerEventType, GuildItem, GuildWelcomeConfigResponse } from '../types';
+
+async function withFirestoreReconnect<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (isOfflineFirestoreError(err)) {
+      await ensureFirestoreOnline();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return await fn();
+    }
+    throw err;
+  }
+}
 
 export interface PersistedBannerRule {
   enabled: boolean;
@@ -197,35 +218,37 @@ export async function ensureCloudUserProfile(
   const userRef = doc(db, 'users', uid);
 
   try {
-    const snap = await getDoc(userRef);
-    const email = (firebaseUser.email || '').slice(0, 254);
-    const displayName = (firebaseUser.displayName || '').slice(0, 120);
-    const cleanDiscordId = discordUserId.slice(0, 40);
+    await withFirestoreReconnect(async () => {
+      const snap = await getDoc(userRef);
+      const email = (firebaseUser.email || '').slice(0, 254);
+      const displayName = (firebaseUser.displayName || '').slice(0, 120);
+      const cleanDiscordId = discordUserId.slice(0, 40);
 
-    if (!snap.exists()) {
-      await setDoc(userRef, {
-        ownerId: uid,
-        email,
-        displayName,
-        discordUserId: cleanDiscordId,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      const existing = snap.data();
-      if (
-        existing.discordUserId !== cleanDiscordId ||
-        existing.email !== email ||
-        existing.displayName !== displayName
-      ) {
-        await updateDoc(userRef, {
+      if (!snap.exists()) {
+        await setDoc(userRef, {
+          ownerId: uid,
           email,
           displayName,
           discordUserId: cleanDiscordId,
+          createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+      } else {
+        const existing = snap.data();
+        if (
+          existing.discordUserId !== cleanDiscordId ||
+          existing.email !== email ||
+          existing.displayName !== displayName
+        ) {
+          await updateDoc(userRef, {
+            email,
+            displayName,
+            discordUserId: cleanDiscordId,
+            updatedAt: serverTimestamp(),
+          });
+        }
       }
-    }
+    });
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, userPath);
   }
@@ -450,8 +473,10 @@ export async function syncManagedGuildsWithCloud(
     const uid = sanitizeId(firebaseUser.uid, 128);
     const listPath = `users/${uid}/guildConfigs`;
     try {
-      const q = query(collection(db, 'users', uid, 'guildConfigs'), where('ownerId', '==', uid));
-      const snap = await getDocs(q);
+      const snap = await withFirestoreReconnect(async () => {
+        const q = query(collection(db, 'users', uid, 'guildConfigs'), where('ownerId', '==', uid));
+        return await getDocs(q);
+      });
       for (const d of snap.docs) {
         cloudDocsByGuild[d.id] = d.data();
       }
@@ -548,17 +573,19 @@ export async function saveTikTokBackupToCloud(
   };
 
   try {
-    const existing = await getDoc(ref);
-    if (!existing.exists()) {
-      await setDoc(ref, {
-        ownerId: uid,
-        provider: 'tiktok',
-        ...payload,
-        createdAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(ref, payload);
-    }
+    await withFirestoreReconnect(async () => {
+      const existing = await getDoc(ref);
+      if (!existing.exists()) {
+        await setDoc(ref, {
+          ownerId: uid,
+          provider: 'tiktok',
+          ...payload,
+          createdAt: serverTimestamp(),
+        });
+      } else {
+        await updateDoc(ref, payload);
+      }
+    });
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, pathStr);
   }
@@ -570,7 +597,9 @@ export async function loadTikTokBackupFromCloud(
   const uid = sanitizeId(firebaseUser.uid, 128);
   const pathStr = `users/${uid}/integrations/tiktok`;
   try {
-    const snap = await getDoc(doc(db, 'users', uid, 'integrations', 'tiktok'));
+    const snap = await withFirestoreReconnect(() =>
+      getDoc(doc(db, 'users', uid, 'integrations', 'tiktok')),
+    );
     if (!snap.exists()) return null;
     const data = snap.data();
     if (typeof data.encryptedBackup !== 'string' || !data.encryptedBackup) return null;

@@ -227,6 +227,9 @@ export default function App() {
     if (!firebaseReady || !config?.authenticated || !config.user?.id || managedGuilds.length === 0) {
       return;
     }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return;
+    }
 
     const syncKey = `${config.user.id}:${firebaseUser?.uid ?? 'local'}:${managedGuilds.map((g) => g.id).join(',')}`;
     if (lastCloudSyncKeyRef.current === syncKey) return;
@@ -276,6 +279,9 @@ export default function App() {
     if (!firebaseReady || !firebaseUser || !config?.authenticated || !config.user?.id || !tiktokStatus) {
       return;
     }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return;
+    }
 
     const syncKey = `${config.user.id}:${firebaseUser.uid}:${tiktokStatus.connected ? tiktokStatus.account?.openId ?? '1' : '0'}`;
     if (lastTikTokCloudSyncKeyRef.current === syncKey) return;
@@ -301,6 +307,8 @@ export default function App() {
             });
             if (resp.ok) {
               await loadTikTokStatus();
+            } else if (resp.status === 400) {
+              await deleteTikTokBackupFromCloud(firebaseUser).catch(() => {});
             }
           }
         }
@@ -647,28 +655,26 @@ export default function App() {
     [completeTikTokLogin],
   );
 
-  const handleForceCompleteQr = useCallback(
-    async (username?: string): Promise<TikTokLoginResult> => {
+  const handleConnectTikTokAutoTok = useCallback(
+    async (params: { sessionId: string; accountName?: string; datacenter?: string }): Promise<TikTokLoginResult> => {
       setTiktokLoading(true);
       setTiktokError(null);
       try {
-        const resp = await apiFetch('/api/tiktok/qr/force-complete', {
+        const resp = await apiFetch('/api/tiktok/accounts/connect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username }),
+          body: JSON.stringify(params),
         });
         const data = (await resp.json().catch(() => ({}))) as TikTokLoginResult;
         if (!resp.ok || !data.ok) {
-          setTiktokError(data.error || 'Não foi possível concluir a conexão QR.');
-          return data;
+          const errMsg = data.error || 'Não foi possível autenticar a sessão via AutoTok.';
+          setTiktokError(errMsg);
+          return { ok: false, error: errMsg };
         }
-
-        if (data.connected && data.account) {
-          await completeTikTokLogin();
-        }
+        await completeTikTokLogin();
         return data;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erro ao concluir conexão QR.';
+        const msg = err instanceof Error ? err.message : 'Erro de comunicação ao conectar via AutoTok.';
         setTiktokError(msg);
         return { ok: false, error: msg };
       } finally {
@@ -677,6 +683,56 @@ export default function App() {
     },
     [completeTikTokLogin],
   );
+
+  const handleSelectTikTokAccount = useCallback(
+    async (accountId: string): Promise<void> => {
+      try {
+        await apiFetch(`/api/tiktok/accounts/${encodeURIComponent(accountId)}/select`, {
+          method: 'POST',
+        });
+        await loadTikTokStatus();
+      } catch {
+        // Non-blocking
+      }
+    },
+    [loadTikTokStatus],
+  );
+
+  const handleDeleteTikTokAccount = useCallback(
+    async (accountId: string): Promise<void> => {
+      setTiktokLoading(true);
+      try {
+        await apiFetch(`/api/tiktok/accounts/${encodeURIComponent(accountId)}`, {
+          method: 'DELETE',
+        });
+        await loadTikTokStatus();
+      } catch {
+        // Non-blocking
+      } finally {
+        setTiktokLoading(false);
+      }
+    },
+    [loadTikTokStatus],
+  );
+
+  const handleVerifyTikTokAccount = useCallback(
+    async (accountId: string): Promise<{ valid: boolean; reason?: string }> => {
+      try {
+        const resp = await apiFetch(`/api/tiktok/accounts/${encodeURIComponent(accountId)}/verify`, {
+          method: 'POST',
+        });
+        const data = (await resp.json().catch(() => ({}))) as { valid: boolean; reason?: string };
+        return data;
+      } catch (err) {
+        return {
+          valid: false,
+          reason: err instanceof Error ? err.message : 'Erro ao verificar conta no AutoTok.',
+        };
+      }
+    },
+    [],
+  );
+
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -829,6 +885,7 @@ export default function App() {
           nextExpCode={nextExpCode}
           expLoading={expLoading}
           tiktokConnected={tiktokConnected}
+          tiktokAccounts={tiktokStatus?.accounts ?? []}
           onRefreshExp={() => void loadExpRecords()}
           onOpenDrawer={() => setDrawerOpen(true)}
           onOpenTikTokSettings={() => handleDrawerNavigate('tiktok')}
@@ -851,21 +908,18 @@ export default function App() {
           authenticated={Boolean(config?.authenticated)}
           user={config?.user ?? null}
           tiktokStatus={tiktokStatus}
-          qrState={tiktokQrState}
+          accounts={tiktokStatus?.accounts ?? []}
+          activeAccountId={tiktokStatus?.activeAccountId ?? null}
+          qrState={null}
           loading={tiktokLoading}
-          connecting={tiktokConnecting}
+          connecting={false}
           error={tiktokError}
           onOpenDrawer={() => setDrawerOpen(true)}
           onBackDashboard={() => setView('dashboard')}
           onLoginDiscord={() => void openDiscordOAuthPopup('login')}
-          onConnectCredentials={handleLoginTikTokCredentials}
-          onSubmit2Fa={handleSubmitTikTok2Fa}
-          onCancel2Fa={handleCancelTikTok2Fa}
-          onConnectCookie={handleLoginTikTokCookie}
-          onConnectWebhook={handleLoginTikTokWebhook}
-          onConnectTikTokQr={() => void handleConnectTikTok()}
-          onForceCompleteQr={handleForceCompleteQr}
-          onCancelQr={() => void handleCancelTikTokQr()}
+          onSelectAccount={handleSelectTikTokAccount}
+          onDeleteAccount={handleDeleteTikTokAccount}
+          onVerifyAccount={handleVerifyTikTokAccount}
           onDisconnectTikTok={() => void handleDisconnectTikTok()}
           onRefreshStatus={() => void loadTikTokStatus()}
         />
@@ -882,6 +936,7 @@ export default function App() {
           nextExpCode={nextExpCode}
           loading={expLoading}
           tiktokConnected={tiktokConnected}
+          tiktokAccounts={tiktokStatus?.accounts ?? []}
           onRefresh={() => void loadExpRecords()}
           onOpenDrawer={() => setDrawerOpen(true)}
           onBackDashboard={() => setView('dashboard')}

@@ -36,6 +36,12 @@ import {
   updateMuralRequest,
 } from './muralStore.ts';
 import { renderMuralCard } from './muralRenderer.ts';
+import {
+  findChorarChannelInGuild,
+  findMuralChannelInGuild,
+  findPedirMuralChannelInGuild,
+  normalizeDiscordName,
+} from './channelUtils.ts';
 
 const activeChannelOperations = new Set<string>();
 const UNIFIED_EMBED_COLOR = 0x1e2025;
@@ -47,10 +53,7 @@ const FALLBACK_KISS_GIFS = [
 ];
 
 function normalizeChannelName(name: string): string {
-  return name
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
+  return normalizeDiscordName(name);
 }
 
 function isGuildAdmin(
@@ -682,44 +685,15 @@ async function handleKissCommand(interaction: ChatInputCommandInteraction): Prom
 }
 
 function findMuralChannel(guild: Guild): TextChannel | NewsChannel | null {
-  const textChannels: Array<TextChannel | NewsChannel> = [];
-  for (const ch of guild.channels.cache.values()) {
-    if (isGuildTextOrAnnouncement(ch)) {
-      textChannels.push(ch);
-    }
-  }
-
-  const primary = textChannels.find((ch) => {
-    const norm = normalizeChannelName(ch.name);
-    return norm.includes('mural') && !norm.includes('pedir');
-  });
-  if (primary) return primary;
-
-  return (
-    textChannels.find((ch) => normalizeChannelName(ch.name).includes('mural')) ?? null
-  );
+  return findMuralChannelInGuild(guild);
 }
 
 function findPedirMuralChannel(guild: Guild): TextChannel | NewsChannel | null {
-  for (const ch of guild.channels.cache.values()) {
-    if (!isGuildTextOrAnnouncement(ch)) continue;
-    const norm = normalizeChannelName(ch.name);
-    if (norm.includes('pedir') && norm.includes('mural')) {
-      return ch;
-    }
-  }
-  return null;
+  return findPedirMuralChannelInGuild(guild);
 }
 
 function findChorarChannel(guild: Guild): TextChannel | NewsChannel | null {
-  for (const ch of guild.channels.cache.values()) {
-    if (!isGuildTextOrAnnouncement(ch)) continue;
-    const norm = normalizeChannelName(ch.name);
-    if (norm.includes('chorar')) {
-      return ch;
-    }
-  }
-  return null;
+  return findChorarChannelInGuild(guild);
 }
 
 async function enforceReadOnlyChannelPermissions(

@@ -90,7 +90,7 @@ export function AppDrawer({
             >
               <span className="flex items-center gap-3">
                 <Share2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>Conexão TikTok</span>
+                <span>Contas TikTok</span>
               </span>
               <span
                 className={`text-xs font-normal ${

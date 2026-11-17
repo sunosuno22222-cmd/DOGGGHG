@@ -760,3 +760,137 @@ export async function generateCarouselSlideshowVideo(
   return outPath;
 }
 
+export const TIKTOK_TEST_POST_TEXT =
+  'Olá, eu sou 5573exp, sou uma conta vinculada a um bot do Discord, onde meu principal objetivo é explanar os dados informados no canal do servidor. Cada postagem é simultaneamente enviada por um bot, mas configurada manualmente por alguém do servidor. Todos os dados informados serão divulgados em vídeos aqui deste perfil.';
+
+export const TIKTOK_TEST_POST_CAPTION = `Exp ${EXP_HASHTAGS}`;
+
+export interface GeneratedTestMediaResult {
+  imagePath: string;
+  videoPath: string;
+  trackArtist: string | null;
+  trackTitle: string | null;
+}
+
+/**
+ * Generates a single pure-text image containing ONLY TIKTOK_TEST_POST_TEXT
+ * (zero badges, zero headers, zero extra elements) and compiles an MP4
+ * with a randomly selected soundtrack attached as audio.
+ */
+export async function generateTikTokTestMedia(
+  audioTrack?: { artist: string; title: string; localPath: string } | null,
+): Promise<GeneratedTestMediaResult> {
+  const testDir = path.resolve(process.cwd(), 'server', 'data', 'tiktok-test');
+  fs.mkdirSync(testDir, { recursive: true });
+
+  const W = 1080;
+  const H = 1350;
+  const lines = wrapLines(TIKTOK_TEST_POST_TEXT, 34, 18);
+  const fontSize = 38;
+  const lineHeight = 58;
+  const blockHeight = (lines.length - 1) * lineHeight;
+  const startY = Math.round((H - blockHeight) / 2);
+
+  // Pure matte dark canvas with ONLY the exact informed text — zero extra elements
+  const svg = Buffer.from(
+    `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+      <rect width="${W}" height="${H}" fill="#141519"/>
+      ${renderLinesSvg(lines, 104, startY, lineHeight, fontSize, '#F4F4F5', '500', 'start')}
+    </svg>`,
+  );
+
+  const imagePath = path.resolve(testDir, 'test-post.png');
+  await sharp(svg).png().toFile(imagePath);
+
+  const videoPath = path.resolve(testDir, 'test-post.mp4');
+  const durationSec = 15;
+
+  if (audioTrack?.localPath && fs.existsSync(audioTrack.localPath)) {
+    await execFileAsync(
+      'ffmpeg',
+      [
+        '-y',
+        '-loop',
+        '1',
+        '-t',
+        String(durationSec),
+        '-i',
+        imagePath,
+        '-i',
+        audioTrack.localPath,
+        '-vf',
+        'fps=30,format=yuv420p,setsar=1',
+        '-map',
+        '0:v',
+        '-map',
+        '1:a',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '22',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-shortest',
+        '-movflags',
+        '+faststart',
+        videoPath,
+      ],
+      { timeout: 60_000 },
+    );
+  } else {
+    await execFileAsync(
+      'ffmpeg',
+      [
+        '-y',
+        '-loop',
+        '1',
+        '-t',
+        String(durationSec),
+        '-i',
+        imagePath,
+        '-f',
+        'lavfi',
+        '-i',
+        'anullsrc=channel_layout=stereo:sample_rate=44100',
+        '-vf',
+        'fps=30,format=yuv420p,setsar=1',
+        '-map',
+        '0:v',
+        '-map',
+        '1:a',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '22',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '96k',
+        '-shortest',
+        '-movflags',
+        '+faststart',
+        videoPath,
+      ],
+      { timeout: 60_000 },
+    );
+  }
+
+  return {
+    imagePath,
+    videoPath,
+    trackArtist: audioTrack?.artist ?? null,
+    trackTitle: audioTrack?.title ?? null,
+  };
+}
+
+
