@@ -23,11 +23,23 @@ export interface ExpDraftRecord {
   description: string;
   whatHappened: string;
   whyWrong: string;
+  additionalInsults?: string;
   mediaLinks: string[];
   otherLinks: string[];
+  personPhotoFile?: string | null;
+  proofFiles?: string[];
   selectedFormat: ExpFormat | null;
   previewImagePath: string | null;
   updatedAt: string;
+}
+
+export type CarouselPublishMode = 'video_slideshow' | 'photo_carousel';
+
+export interface ExpAudioTrackMeta {
+  id?: string;
+  artist: string;
+  title: string;
+  previewUrl?: string;
 }
 
 export interface ExpRecord {
@@ -40,8 +52,19 @@ export interface ExpRecord {
   description: string;
   whatHappened: string;
   whyWrong: string;
+  additionalInsults?: string;
+  title?: string;
+  information?: string;
+  additionalText?: string;
+  insultText?: string;
+  closingText?: string;
+  watermarkText?: string;
+  audioTrack?: ExpAudioTrackMeta | null;
+  carouselPublishMode?: CarouselPublishMode;
   mediaLinks: string[];
   otherLinks: string[];
+  personPhotoFile?: string | null;
+  proofFiles?: string[];
   format: ExpFormat;
   status: ExpStatus;
   expNumber: number | null;
@@ -56,6 +79,7 @@ export interface ExpRecord {
   tiktokPublishMode: string | null;
   tiktokStatusText: string | null;
   tiktokError: string | null;
+  tiktokPostUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -71,6 +95,7 @@ const DATA_DIR = path.resolve(process.cwd(), 'server', 'data');
 const EXP_STORE_FILE = path.resolve(DATA_DIR, 'exp-store.json');
 const EXP_DRAFTS_FILE = path.resolve(DATA_DIR, 'exp-drafts.json');
 const EXP_MEDIA_DIR = path.resolve(DATA_DIR, 'exp-media');
+const EXP_DRAFT_MEDIA_DIR = path.resolve(DATA_DIR, 'exp-draft-media');
 
 export const EXP_HASHTAGS = '#paneleiro #bot #fyb #5573 #exp';
 
@@ -85,6 +110,7 @@ export function formatExpCaption(num: number): string {
 function ensureDirs(): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(EXP_MEDIA_DIR, { recursive: true });
+  fs.mkdirSync(EXP_DRAFT_MEDIA_DIR, { recursive: true });
 }
 
 function readState(): ExpPersistedState {
@@ -120,6 +146,17 @@ function readState(): ExpPersistedState {
   } catch {
     return { nextExpNumber: 1, usedNumbers: [], records: {}, guildOwners: {} };
   }
+}
+
+export function deleteAllExpRecords(): void {
+  const state = { nextExpNumber: 1, usedNumbers: [], records: {}, guildOwners: {} };
+  writeState(state);
+  try {
+    if (fs.existsSync(EXP_MEDIA_DIR)) {
+      fs.rmSync(EXP_MEDIA_DIR, { recursive: true, force: true });
+      fs.mkdirSync(EXP_MEDIA_DIR, { recursive: true });
+    }
+  } catch {}
 }
 
 function writeState(state: ExpPersistedState): void {
@@ -276,11 +313,17 @@ export function syncUsedExpNumbersFloor(maxKnownNumber: number): void {
 export function createExpRecord(
   input: Omit<ExpRecord, 'id' | 'mediaToken' | 'createdAt' | 'updatedAt'>,
 ): ExpRecord {
+  deleteAllExpRecords();
   const state = readState();
+  state.nextExpNumber = 1;
+  state.usedNumbers = [1];
   const id = `EXP-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
   const now = new Date().toISOString();
   const record: ExpRecord = {
     ...input,
+    expNumber: 1,
+    expCode: formatExpCode(1),
+    caption: formatExpCaption(1),
     id,
     mediaToken: crypto.randomBytes(16).toString('hex'),
     createdAt: now,
@@ -331,6 +374,70 @@ export function upsertRestoredExpRecord(record: ExpRecord): void {
     }
   }
   writeState(state);
+}
+
+export function getExpDraftMediaDir(guildId: string, userId: string): string {
+  ensureDirs();
+  const safeKey = `${guildId}_${userId}`.replace(/[^a-zA-Z0-9_-]/g, '');
+  const dir = path.resolve(EXP_DRAFT_MEDIA_DIR, safeKey);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function clearExpDraftMediaDir(guildId: string, userId: string): void {
+  const safeKey = `${guildId}_${userId}`.replace(/[^a-zA-Z0-9_-]/g, '');
+  const dir = path.resolve(EXP_DRAFT_MEDIA_DIR, safeKey);
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+export function getExpDraftMediaFilePath(guildId: string, userId: string, filename: string): string | null {
+  const safeKey = `${guildId}_${userId}`.replace(/[^a-zA-Z0-9_-]/g, '');
+  const safeFile = path.basename(filename);
+  if (!safeKey || !safeFile) return null;
+  const dir = path.resolve(EXP_DRAFT_MEDIA_DIR, safeKey);
+  const fullPath = path.resolve(dir, safeFile);
+  if (!fullPath.startsWith(dir + path.sep)) return null;
+  return fullPath;
+}
+
+export function promoteDraftMediaToExp(
+  guildId: string,
+  userId: string,
+  expId: string,
+  personPhotoFile: string | null | undefined,
+  proofFiles: string[] | undefined,
+): { personPhotoFile: string | null; proofFiles: string[] } {
+  const expDir = getExpMediaDir(expId);
+  let promotedPerson: string | null = null;
+  const promotedProofs: string[] = [];
+
+  if (personPhotoFile) {
+    const src = getExpDraftMediaFilePath(guildId, userId, personPhotoFile);
+    if (src && fs.existsSync(src)) {
+      const destName = `source-person-${path.basename(personPhotoFile)}`;
+      const dest = path.resolve(expDir, destName);
+      fs.copyFileSync(src, dest);
+      promotedPerson = destName;
+    }
+  }
+
+  if (Array.isArray(proofFiles)) {
+    for (let i = 0; i < proofFiles.length; i++) {
+      const f = proofFiles[i];
+      const src = getExpDraftMediaFilePath(guildId, userId, f);
+      if (src && fs.existsSync(src)) {
+        const destName = `source-proof-${i + 1}-${path.basename(f)}`;
+        const dest = path.resolve(expDir, destName);
+        fs.copyFileSync(src, dest);
+        promotedProofs.push(destName);
+      }
+    }
+  }
+
+  clearExpDraftMediaDir(guildId, userId);
+  return { personPhotoFile: promotedPerson, proofFiles: promotedProofs };
 }
 
 export function getExpMediaDir(expId: string): string {
@@ -387,14 +494,20 @@ export interface PrivacyValidationResult {
 }
 
 /**
- * Blocks private/sensitive personal data (CPFs, RGs, CNH, CEPs, emails, phone numbers,
- * physical addresses, passwords/credentials, financial keys, and intimate media references).
+ * Validates that at least one required text field was provided.
  */
 export function validateExpNoPrivateData(fields: {
   involvedName?: string;
   description?: string;
   whatHappened?: string;
   whyWrong?: string;
+  additionalInsults?: string;
+  title?: string;
+  information?: string;
+  additionalText?: string;
+  insultText?: string;
+  closingText?: string;
+  watermarkText?: string;
   mediaLinks?: string;
   otherLinks?: string;
 }): PrivacyValidationResult {
@@ -403,6 +516,13 @@ export function validateExpNoPrivateData(fields: {
     fields.description || '',
     fields.whatHappened || '',
     fields.whyWrong || '',
+    fields.additionalInsults || '',
+    fields.title || '',
+    fields.information || '',
+    fields.additionalText || '',
+    fields.insultText || '',
+    fields.closingText || '',
+    fields.watermarkText || '',
     fields.mediaLinks || '',
     fields.otherLinks || '',
   ]
@@ -411,95 +531,6 @@ export function validateExpNoPrivateData(fields: {
 
   if (!combined) {
     return { ok: false, reason: 'Preencha as informações obrigatórias do relato.' };
-  }
-
-  // Strip valid http/https URLs before checking phone/number patterns so URL IDs aren't flagged falsely
-  const textWithoutUrls = combined.replace(/https?:\/\/[^\s]+/gi, ' ');
-
-  // 1. Brazilian CPF (123.456.789-00 or explicit cpf + 11 digits)
-  if (
-    /\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/.test(textWithoutUrls) ||
-    /\bcpf\b[\s:=-]*\d{11}\b/i.test(textWithoutUrls)
-  ) {
-    return {
-      ok: false,
-      reason: 'Dados pessoais sensíveis detectados (CPF). Remova documentos pessoais antes de enviar.',
-    };
-  }
-
-  // 2. CNPJ / RG / CNH explicit numbers
-  if (
-    /\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/.test(textWithoutUrls) ||
-    /\b(rg|cnh|titulo de eleitor|passaporte)\b[\s:=-]*[a-z0-9.-]{5,}/i.test(textWithoutUrls)
-  ) {
-    return {
-      ok: false,
-      reason: 'Documento pessoal detectado (RG/CNH/CNPJ). Não insira documentos privados.',
-    };
-  }
-
-  // 3. CEP (12345-678)
-  if (/\b\d{5}-\d{3}\b/.test(textWithoutUrls) || /\bcep\b[\s:=-]*\d{5,8}/i.test(textWithoutUrls)) {
-    return {
-      ok: false,
-      reason: 'Endereço/CEP detectado. Não insira endereços residenciais ou localizações privadas.',
-    };
-  }
-
-  // 4. Email addresses
-  if (/\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b/i.test(textWithoutUrls)) {
-    return {
-      ok: false,
-      reason: 'E-mail pessoal detectado. Remova endereços de e-mail privados.',
-    };
-  }
-
-  // 5. Phone numbers (+55 (11) 91234-5678 / (11) 91234-5678 / 11 91234-5678)
-  if (
-    /(?:\+?\d{1,3}[\s.-]?)?\(?\d{2}\)?[\s.-]?(?:9\d{4}|\d{4})[-\s.]\d{4}\b/.test(
-      textWithoutUrls,
-    ) ||
-    /\b(telefone|celular|whatsapp|zap|fone)\b[\s:=-]*\+?\d{8,15}/i.test(textWithoutUrls)
-  ) {
-    return {
-      ok: false,
-      reason: 'Número de telefone/WhatsApp detectado. Não insira telefones pessoais.',
-    };
-  }
-
-  // 6. Street / home addresses
-  if (
-    /\b(endere[cç]o|rua|avenida|av\.|travessa|alameda|rodovia|loteamento|condom[ií]nio|apartamento|apto\.?)\s+[a-záéíóúâêôãõç0-9\s,.-]{3,}(?:n[º°o]?\.?\s*\d+|\d{1,5})/i.test(
-      textWithoutUrls,
-    )
-  ) {
-    return {
-      ok: false,
-      reason: 'Possível endereço residencial detectado. Remova endereços físicos do relato.',
-    };
-  }
-
-  // 7. Passwords, credit cards, bank / PIX keys, private tokens
-  if (
-    /\b(senha|password|passwd|pin\s*[:=]|cvv\s*[:=]|chave\s*pix)\b/i.test(textWithoutUrls) ||
-    /\b(?:\d[ -]*?){13,16}\b/.test(textWithoutUrls)
-  ) {
-    return {
-      ok: false,
-      reason: 'Credenciais, senhas ou dados bancários não são permitidos no sistema EXP.',
-    };
-  }
-
-  // 8. Intimate / non-consensual private media block
-  if (
-    /\b(nude|nudes|nudez|pack\s*[ií]ntim|vazar\s*[ií]ntim|foto\s*[ií]ntima|v[ií]deo\s*[ií]ntimo|porn[oô]?|sexting)\b/i.test(
-      combined,
-    )
-  ) {
-    return {
-      ok: false,
-      reason: 'Conteúdo íntimo ou sexual privado é estritamente proibido no sistema EXP.',
-    };
   }
 
   return { ok: true };

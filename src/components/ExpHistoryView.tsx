@@ -3,21 +3,24 @@ import {
   AlertCircle,
   ArrowLeft,
   CheckCircle2,
-  Eye,
   ExternalLink,
   Film,
   Images,
   Menu,
+  Music,
+  Plus,
   RefreshCw,
   Send,
   ShieldAlert,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import { ExpCarouselStudio } from './ExpCarouselStudio';
 import type {
-  ExpFormat,
+  CarouselPublishMode,
   ExpRecordView,
-  ExpRecordsResponse,
   ExpStatus,
+  GuildItem,
   TikTokAccountInfo,
 } from '../types';
 
@@ -27,8 +30,10 @@ interface ExpHistoryViewProps {
   loading: boolean;
   tiktokConnected: boolean;
   tiktokAccounts?: TikTokAccountInfo[];
+  managedGuilds?: GuildItem[];
   embeddedInServerPanel?: boolean;
   fixedGuildId?: string;
+  fixedGuildName?: string;
   onRefresh: () => void;
   onOpenDrawer?: () => void;
   onBackDashboard?: () => void;
@@ -42,9 +47,9 @@ function getStatusLabel(status: ExpStatus): { text: string; tone: string } {
     case 'published_tiktok':
       return { text: 'Publicado no TikTok', tone: 'text-emerald-700' };
     case 'tiktok_inbox':
-      return { text: 'Enviado para Inbox TikTok', tone: 'text-emerald-700' };
+      return { text: 'Enviado para Rascunho TikTok', tone: 'text-emerald-700' };
     case 'awaiting_tiktok_confirmation':
-      return { text: 'Aguardando confirmação TikTok', tone: 'text-amber-700' };
+      return { text: 'Aguardando ação TikTok', tone: 'text-amber-700' };
     case 'tiktok_error':
       return { text: 'Gerado · Erro no TikTok', tone: 'text-red-700' };
     case 'accepted':
@@ -124,8 +129,10 @@ export function ExpHistoryView({
   loading,
   tiktokConnected,
   tiktokAccounts,
+  managedGuilds = [],
   embeddedInServerPanel = false,
   fixedGuildId,
+  fixedGuildName,
   onRefresh,
   onOpenDrawer,
   onBackDashboard,
@@ -133,10 +140,16 @@ export function ExpHistoryView({
 }: ExpHistoryViewProps) {
   const [filter, setFilter] = useState<StatusFilter>('all');
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [checkingPostId, setCheckingPostId] = useState<string | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
+  const [captionOverrides, setCaptionOverrides] = useState<Record<string, string>>({});
+  const [hashtagOverrides, setHashtagOverrides] = useState<Record<string, string>>({});
+  const [carouselModeOverrides, setCarouselModeOverrides] = useState<Record<string, CarouselPublishMode>>({});
+  const [expandedOptionsId, setExpandedOptionsId] = useState<string | null>(null);
   const [actionFeedback, setActionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null,
   );
+  const [studioOpen, setStudioOpen] = useState<boolean>(() => !embeddedInServerPanel);
 
   useEffect(() => {
     if (tiktokAccounts && tiktokAccounts.length > 0 && !selectedAccountId) {
@@ -147,19 +160,6 @@ export function ExpHistoryView({
     }
   }, [tiktokAccounts, selectedAccountId]);
 
-  // Interactive preview workbench state
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [formInvolved, setFormInvolved] = useState('');
-  const [formDesc, setFormDesc] = useState('');
-  const [formWhat, setFormWhat] = useState('');
-  const [formWhy, setFormWhy] = useState('');
-  const [formMediaLinks, setFormMediaLinks] = useState('');
-  const [formOtherLinks, setFormOtherLinks] = useState('');
-  const [formFormat, setFormFormat] = useState<ExpFormat>('carousel');
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewError, setPreviewError] = useState<string | null>(null);
-  const [generatingPreview, setGeneratingPreview] = useState(false);
-
   const visibleRecords = useMemo(() => {
     return records
       .filter((r) => (!fixedGuildId ? true : r.guildId === fixedGuildId))
@@ -167,7 +167,11 @@ export function ExpHistoryView({
         if (filter === 'all') return true;
         if (filter === 'pending') return r.status === 'pending';
         if (filter === 'published')
-          return r.status === 'published_tiktok' || r.status === 'tiktok_inbox' || r.status === 'accepted';
+          return (
+            r.status === 'published_tiktok' ||
+            r.status === 'tiktok_inbox' ||
+            r.status === 'accepted'
+          );
         if (filter === 'confirmation')
           return r.status === 'awaiting_tiktok_confirmation' || r.status === 'tiktok_error';
         if (filter === 'rejected') return r.status === 'rejected';
@@ -176,33 +180,48 @@ export function ExpHistoryView({
   }, [records, fixedGuildId, filter]);
 
   const handlePublishTikTok = useCallback(
-    async (record: ExpRecordView, mode: 'auto' | 'inbox_draft' | 'direct_private') => {
+    async (
+      record: ExpRecordView,
+      mode: 'auto' | 'inbox_draft' | 'direct_private',
+    ) => {
       setBusyId(record.id);
       setActionFeedback(null);
       try {
-        const resp = await apiFetch(
-          `/api/guilds/${record.guildId}/exp/${record.id}/publish-tiktok`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode, accountId: selectedAccountId || undefined }),
-          },
-        );
+        const endpoint =
+          record.guildId === 'web-studio'
+            ? `/api/exp/${record.id}/publish-tiktok`
+            : `/api/guilds/${record.guildId}/exp/${record.id}/publish-tiktok`;
+
+        const resp = await apiFetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode,
+            accountId: selectedAccountId || undefined,
+            caption: captionOverrides[record.id] || undefined,
+            hashtags: hashtagOverrides[record.id] || undefined,
+            carouselMode:
+              carouselModeOverrides[record.id] ||
+              record.carouselPublishMode ||
+              'video_slideshow',
+          }),
+        });
         const data = (await resp.json().catch(() => ({}))) as {
           outcome?: string;
           statusText?: string;
           error?: string;
         };
-        if (!resp.ok) {
+        if (!resp.ok || data.outcome === 'error' || data.outcome === 'not_connected') {
           setActionFeedback({
             type: 'error',
-            text: data.error || 'Não foi possível enviar para o TikTok.',
+            text: data.error || data.statusText || 'Não foi possível enviar para o TikTok.',
           });
         } else {
           setActionFeedback({
-            type: data.outcome === 'error' ? 'error' : 'success',
-            text: data.statusText || 'Status atualizado.',
+            type: 'success',
+            text: data.statusText || 'Status atualizado via Zernio.',
           });
+          setExpandedOptionsId(null);
         }
         onRefresh();
       } catch {
@@ -214,52 +233,56 @@ export function ExpHistoryView({
         setBusyId(null);
       }
     },
-    [onRefresh],
+    [captionOverrides, carouselModeOverrides, hashtagOverrides, onRefresh, selectedAccountId],
   );
 
-  const handleGeneratePreview = async () => {
-    setGeneratingPreview(true);
-    setPreviewError(null);
-    try {
-      const resp = await apiFetch('/api/exp/preview', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          involvedName: formInvolved,
-          description: formDesc,
-          whatHappened: formWhat,
-          whyWrong: formWhy,
-          mediaLinks: formMediaLinks,
-          otherLinks: formOtherLinks,
-          format: formFormat,
-        }),
-      });
-      const data = (await resp.json().catch(() => ({}))) as {
-        previewDataUrl?: string;
-        error?: string;
-      };
-      if (!resp.ok || !data.previewDataUrl) {
-        setPreviewError(data.error || 'Não foi possível gerar a prévia.');
-        setPreviewUrl(null);
-      } else {
-        setPreviewUrl(data.previewDataUrl);
+  const handleCheckPostStatus = useCallback(
+    async (postId: string) => {
+      setCheckingPostId(postId);
+      setActionFeedback(null);
+      try {
+        const resp = await apiFetch(`/api/tiktok/posts/${encodeURIComponent(postId)}/status`);
+        const data = (await resp.json().catch(() => ({}))) as {
+          ok?: boolean;
+          post?: { status?: string; error?: string | null };
+          error?: string;
+        };
+        if (!resp.ok || !data.ok) {
+          setActionFeedback({
+            type: 'error',
+            text: data.error || 'Não foi possível consultar o status no Zernio.',
+          });
+        } else {
+          setActionFeedback({
+            type: data.post?.status === 'failed' ? 'error' : 'success',
+            text:
+              data.post?.error ||
+              `Status atualizado no Zernio: ${data.post?.status || 'concluído'}`,
+          });
+          onRefresh();
+        }
+      } catch {
+        setActionFeedback({
+          type: 'error',
+          text: 'Erro ao consultar status da publicação no Zernio.',
+        });
+      } finally {
+        setCheckingPostId(null);
       }
-    } catch {
-      setPreviewError('Erro de conexão ao gerar a prévia.');
-    } finally {
-      setGeneratingPreview(false);
-    }
-  };
+    },
+    [onRefresh],
+  );
 
   const content = (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-200">
         <div>
           <h2 className="text-xl font-semibold tracking-tight text-slate-900">
-            Histórico de Exposições (EXP)
+            Carrossel EXP e Histórico de Exposições
           </h2>
           <p className="text-sm text-slate-500 mt-1 tabular-nums">
-            Próxima numeração automática: <span className="font-mono font-semibold text-slate-900">{nextExpCode}</span> · Padrão:{' '}
+            Próxima numeração automática:{' '}
+            <span className="font-mono font-semibold text-slate-900">{nextExpCode}</span> · Padrão:{' '}
             <span className="font-mono text-slate-700">{nextExpCode} #paneleiro #bot #fyb #5573 #exp</span>
           </p>
         </div>
@@ -267,11 +290,15 @@ export function ExpHistoryView({
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => setPreviewOpen((v) => !v)}
-            className="min-h-[38px] px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-2 whitespace-nowrap transition-colors"
+            onClick={() => setStudioOpen((v) => !v)}
+            className={`min-h-[38px] px-3.5 py-2 rounded-lg text-xs font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors ${
+              studioOpen
+                ? 'border border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                : 'bg-[#5865F2] hover:bg-[#4752C4] text-white'
+            }`}
           >
-            <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>{previewOpen ? 'Ocultar testador de prévia' : 'Testar prévia EXP'}</span>
+            <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{studioOpen ? 'Ocultar estúdio web' : 'Criar Carrossel EXP (1 a 8)'}</span>
           </button>
 
           <button
@@ -291,7 +318,7 @@ export function ExpHistoryView({
           <div className="flex items-start gap-2.5">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
             <span>
-              Nenhuma conta TikTok conectada. Conecte sua conta para publicar automaticamente após clicar em ACEITAR no Discord.
+              Nenhuma conta TikTok conectada via Zernio. Conecte sua conta para publicar os carrosséis com músicas russas diretamente pelo site.
             </span>
           </div>
           {onOpenTikTokSettings && (
@@ -324,162 +351,17 @@ export function ExpHistoryView({
         </div>
       )}
 
-      {previewOpen && (
-        <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
-          <div>
-            <h3 className="text-base font-semibold text-slate-900">
-              Prévia e Validação Anti-Dados Privados
-            </h3>
-            <p className="text-xs text-slate-500 mt-1">
-              Simule o formulário do canal #exp para visualizar como a imagem de capa ficará antes do envio e validar bloqueios de privacidade.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-            <div className="space-y-3.5">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Nome ou identificação pública (opcional)
-                </label>
-                <input
-                  type="text"
-                  value={formInvolved}
-                  onChange={(e) => setFormInvolved(e.target.value)}
-                  maxLength={80}
-                  placeholder="Ex.: @usuario_publico"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Descrição do ocorrido
-                </label>
-                <input
-                  type="text"
-                  value={formDesc}
-                  onChange={(e) => setFormDesc(e.target.value)}
-                  maxLength={160}
-                  placeholder="Resumo objetivo do caso"
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  O que aconteceu?
-                </label>
-                <textarea
-                  rows={3}
-                  value={formWhat}
-                  onChange={(e) => setFormWhat(e.target.value)}
-                  maxLength={1000}
-                  placeholder="Descreva os fatos sem dados pessoais privados..."
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">
-                  Por que isso é considerado errado?
-                </label>
-                <textarea
-                  rows={2}
-                  value={formWhy}
-                  onChange={(e) => setFormWhy(e.target.value)}
-                  maxLength={600}
-                  placeholder="Explique o motivo..."
-                  className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Links de imagens/vídeos (opcional)
-                  </label>
-                  <input
-                    type="text"
-                    value={formMediaLinks}
-                    onChange={(e) => setFormMediaLinks(e.target.value)}
-                    placeholder="https://..."
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Links de outras evidências (opcional)
-                  </label>
-                  <input
-                    type="text"
-                    value={formOtherLinks}
-                    onChange={(e) => setFormOtherLinks(e.target.value)}
-                    placeholder="https://..."
-                    className="w-full px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                  />
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-                  <button
-                    type="button"
-                    onClick={() => setFormFormat('carousel')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                      formFormat === 'carousel'
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Carrossel de imagens
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setFormFormat('video')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                      formFormat === 'video'
-                        ? 'bg-white text-slate-900 shadow-sm'
-                        : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    Vídeo
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => void handleGeneratePreview()}
-                  disabled={generatingPreview}
-                  className="min-h-[38px] px-4 py-2 rounded-lg bg-[#5865F2] hover:bg-[#4752C4] text-white text-xs font-medium inline-flex items-center gap-2 whitespace-nowrap transition-colors disabled:opacity-50"
-                >
-                  <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>{generatingPreview ? 'Gerando...' : 'Gerar prévia'}</span>
-                </button>
-              </div>
-
-              {previewError && (
-                <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3.5 py-2.5">
-                  {previewError}
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center justify-center bg-slate-50 border border-slate-200 rounded-xl p-4 min-h-[320px]">
-              {previewUrl ? (
-                <img
-                  src={previewUrl}
-                  alt="Prévia EXP"
-                  referrerPolicy="no-referrer"
-                  className="max-h-[420px] rounded-lg border border-slate-200 object-contain"
-                />
-              ) : (
-                <div className="text-center text-xs text-slate-500 max-w-xs">
-                  Preencha os campos ao lado e clique em <strong>Gerar prévia</strong> para visualizar o card editorial antes do envio.
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
+      {studioOpen && (
+        <ExpCarouselStudio
+          nextExpCode={nextExpCode}
+          tiktokConnected={tiktokConnected}
+          tiktokAccounts={tiktokAccounts}
+          managedGuilds={managedGuilds}
+          fixedGuildId={fixedGuildId}
+          fixedGuildName={fixedGuildName}
+          onCreated={onRefresh}
+          onOpenTikTokSettings={onOpenTikTokSettings}
+        />
       )}
 
       {/* Filter Bar */}
@@ -533,6 +415,11 @@ export function ExpHistoryView({
             const st = getStatusLabel(rec.status);
             const slides = rec.generatedFiles.filter((f) => f.endsWith('.jpg') && f !== 'video-preview.jpg');
             const videoFile = rec.generatedFiles.find((f) => f.endsWith('.mp4')) ?? null;
+            const isOptionsOpen = expandedOptionsId === rec.id;
+            const canPublish =
+              rec.generatedFiles.length > 0 &&
+              rec.status !== 'published_tiktok' &&
+              rec.status !== 'tiktok_inbox';
 
             return (
               <article
@@ -554,14 +441,31 @@ export function ExpHistoryView({
                         ) : (
                           <Film className="w-3.5 h-3.5" aria-hidden="true" />
                         )}
-                        {rec.format === 'carousel' ? 'Carrossel de imagens' : 'Vídeo'}
+                        {rec.format === 'carousel' ? 'Carrossel de fotos' : 'Vídeo'}
                       </span>
+                      {rec.audioTrack && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-1 text-slate-700">
+                            <Music className="w-3 h-3 text-slate-500" aria-hidden="true" />
+                            <span>
+                              {rec.audioTrack.artist} — {rec.audioTrack.title}
+                            </span>
+                          </span>
+                        </>
+                      )}
+                      {rec.watermarkText && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono text-slate-500">{rec.watermarkText}</span>
+                        </>
+                      )}
                       <span aria-hidden="true">·</span>
                       <span className={`font-medium ${st.tone}`}>{st.text}</span>
                     </div>
 
                     <h3 className="text-base font-semibold text-slate-900">
-                      {rec.description}
+                      {rec.title || rec.description}
                     </h3>
                     {rec.caption && (
                       <div className="text-xs font-mono text-slate-600">
@@ -577,15 +481,49 @@ export function ExpHistoryView({
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-3 border-t border-slate-100 text-sm text-slate-700">
                   <div>
-                    <div className="text-xs font-medium text-slate-500 mb-1">O que aconteceu</div>
-                    <p className="text-sm text-slate-800 whitespace-pre-line">{rec.whatHappened}</p>
+                    <div className="text-xs font-medium text-slate-500 mb-1">Informações</div>
+                    <p className="text-sm text-slate-800 whitespace-pre-line">
+                      {rec.information || rec.whatHappened}
+                    </p>
                   </div>
-                  <div>
-                    <div className="text-xs font-medium text-slate-500 mb-1">
-                      Por que é considerado errado
+                  {(rec.insultText?.trim() ||
+                    rec.additionalInsults?.trim() ||
+                    rec.additionalText?.trim() ||
+                    rec.whyWrong?.trim() ||
+                    rec.closingText?.trim()) && (
+                    <div className="space-y-2">
+                      {(rec.additionalText?.trim() || rec.whyWrong?.trim()) && (
+                        <div>
+                          <div className="text-xs font-medium text-slate-500 mb-0.5">
+                            Texto adicional
+                          </div>
+                          <p className="text-sm text-slate-800 whitespace-pre-line">
+                            {rec.additionalText?.trim() || rec.whyWrong}
+                          </p>
+                        </div>
+                      )}
+                      {(rec.insultText?.trim() || rec.additionalInsults?.trim()) && (
+                        <div>
+                          <div className="text-xs font-medium text-slate-500 mb-0.5">
+                            Insulto
+                          </div>
+                          <p className="text-sm text-slate-800 whitespace-pre-line">
+                            {rec.insultText?.trim() || rec.additionalInsults}
+                          </p>
+                        </div>
+                      )}
+                      {rec.closingText?.trim() && (
+                        <div>
+                          <div className="text-xs font-medium text-slate-500 mb-0.5">
+                            Finalização
+                          </div>
+                          <p className="text-sm text-slate-800 whitespace-pre-line">
+                            {rec.closingText}
+                          </p>
+                        </div>
+                      )}
                     </div>
-                    <p className="text-sm text-slate-800 whitespace-pre-line">{rec.whyWrong}</p>
-                  </div>
+                  )}
                 </div>
 
                 {(rec.involvedName || rec.mediaLinks.length > 0 || rec.otherLinks.length > 0) && (
@@ -612,14 +550,12 @@ export function ExpHistoryView({
 
                 {/* Generated Media Preview */}
                 {rec.generatedFiles.length > 0 && (
-                  <div className="pt-3 border-t border-slate-100 space-y-2">
+                  <div className="pt-3 border-t border-slate-100 space-y-3">
                     <div className="text-xs font-medium text-slate-500">
-                      Conteúdo gerado
+                      Molduras e mídia gerada ({slides.length > 0 ? `${slides.length} slides` : 'vídeo'})
                     </div>
-                    {videoFile ? (
-                      <AuthorizedExpMedia expId={rec.id} filename={videoFile} type="video" />
-                    ) : (
-                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+                    {slides.length > 0 && (
+                      <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-2.5">
                         {slides.map((slide) => (
                           <AuthorizedExpMedia
                             key={`${rec.id}-${slide}`}
@@ -630,63 +566,81 @@ export function ExpHistoryView({
                         ))}
                       </div>
                     )}
+                    {videoFile && (
+                      <AuthorizedExpMedia expId={rec.id} filename={videoFile} type="video" />
+                    )}
                   </div>
                 )}
 
                 {/* TikTok Outcome & Action Buttons */}
                 {(rec.tiktokStatusText || rec.tiktokError || rec.generatedFiles.length > 0) && (
-                  <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="text-xs text-slate-600 space-y-0.5">
-                      {rec.tiktokStatusText && <div>{rec.tiktokStatusText}</div>}
-                      {rec.tiktokError && <div className="text-red-600">{rec.tiktokError}</div>}
-                      {rec.tiktokPublishId && (
-                        <div className="font-mono text-slate-500">
-                          Publish ID: {rec.tiktokPublishId}
-                        </div>
-                      )}
-                    </div>
+                  <div className="pt-3 border-t border-slate-100 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="text-xs text-slate-600 space-y-0.5">
+                        {rec.tiktokStatusText && <div>{rec.tiktokStatusText}</div>}
+                        {rec.tiktokError && <div className="text-red-600">{rec.tiktokError}</div>}
+                        {rec.tiktokPublishId && (
+                          <div className="font-mono text-slate-500">
+                            Zernio Post ID: {rec.tiktokPublishId}
+                          </div>
+                        )}
+                      </div>
 
-                    {rec.generatedFiles.length > 0 &&
-                      rec.status !== 'published_tiktok' &&
-                      rec.status !== 'tiktok_inbox' && (
-                        <div className="flex flex-wrap items-center gap-2 shrink-0">
-                          {tiktokAccounts && tiktokAccounts.length > 1 && (
-                            <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1">
-                              <span className="font-semibold text-slate-700">Conta:</span>
-                              <select
-                                value={selectedAccountId}
-                                onChange={(e) => setSelectedAccountId(e.target.value)}
-                                className="bg-transparent text-xs font-medium text-slate-900 focus:outline-none cursor-pointer"
-                              >
-                                {tiktokAccounts.map((acc) => (
-                                  <option key={acc.id} value={acc.id}>
-                                    @{acc.username} {acc.isDefault ? '(Padrão)' : ''}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          )}
-                          {rec.status === 'awaiting_tiktok_confirmation' ? (
-                            <>
-                              <button
-                                type="button"
-                                disabled={busyId === rec.id}
-                                onClick={() => void handlePublishTikTok(rec, 'inbox_draft')}
-                                className="min-h-[34px] px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
-                              >
-                                <Send className="w-3.5 h-3.5" aria-hidden="true" />
-                                <span>Confirmar: Inbox TikTok</span>
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busyId === rec.id}
-                                onClick={() => void handlePublishTikTok(rec, 'direct_private')}
-                                className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium whitespace-nowrap disabled:opacity-50"
-                              >
-                                Confirmar: Privado
-                              </button>
-                            </>
-                          ) : (
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        {rec.tiktokPostUrl && (
+                          <a
+                            href={rec.tiktokPostUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span>Ver no TikTok</span>
+                          </a>
+                        )}
+
+                        {rec.tiktokPublishId && !rec.tiktokPublishId.startsWith('fail_') && (
+                          <button
+                            type="button"
+                            disabled={checkingPostId === rec.tiktokPublishId}
+                            onClick={() => void handleCheckPostStatus(rec.tiktokPublishId!)}
+                            className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            <RefreshCw
+                              className={`w-3.5 h-3.5 ${checkingPostId === rec.tiktokPublishId ? 'animate-spin' : ''}`}
+                            />
+                            <span>Consultar status</span>
+                          </button>
+                        )}
+
+                        {canPublish && (
+                          <>
+                            {tiktokAccounts && tiktokAccounts.length > 0 && (
+                              <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-slate-100 border border-slate-200 rounded-lg px-2.5 py-1">
+                                <span className="font-semibold text-slate-700">Conta:</span>
+                                <select
+                                  value={selectedAccountId}
+                                  onChange={(e) => setSelectedAccountId(e.target.value)}
+                                  className="bg-transparent text-xs font-medium text-slate-900 focus:outline-none cursor-pointer"
+                                >
+                                  {tiktokAccounts.map((acc) => (
+                                    <option key={acc.id} value={acc.id}>
+                                      @{acc.username} {acc.isDefault ? '(Padrão)' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => setExpandedOptionsId(isOptionsOpen ? null : rec.id)}
+                              className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5"
+                            >
+                              <SlidersHorizontal className="w-3.5 h-3.5" />
+                              <span>{isOptionsOpen ? 'Ocultar opções' : 'Opções de legenda'}</span>
+                            </button>
+
                             <button
                               type="button"
                               disabled={busyId === rec.id}
@@ -695,12 +649,85 @@ export function ExpHistoryView({
                             >
                               <Send className="w-3.5 h-3.5" aria-hidden="true" />
                               <span>
-                                {busyId === rec.id ? 'Enviando...' : 'Enviar para TikTok'}
+                                {busyId === rec.id ? 'Publicando...' : 'Publicar no TikTok'}
                               </span>
                             </button>
-                          )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {canPublish && isOptionsOpen && (
+                      <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                              Legenda personalizada (opcional)
+                            </label>
+                            <input
+                              type="text"
+                              value={captionOverrides[rec.id] ?? ''}
+                              onChange={(e) =>
+                                setCaptionOverrides((prev) => ({ ...prev, [rec.id]: e.target.value }))
+                              }
+                              placeholder={`${rec.expCode || 'Exp'} — ${rec.title || rec.description}`}
+                              className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                              Hashtags (opcional)
+                            </label>
+                            <input
+                              type="text"
+                              value={hashtagOverrides[rec.id] ?? ''}
+                              onChange={(e) =>
+                                setHashtagOverrides((prev) => ({ ...prev, [rec.id]: e.target.value }))
+                              }
+                              placeholder="#paneleiro #bot #fyb #5573 #exp"
+                              className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-900"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                              Formato de envio TikTok
+                            </label>
+                            <select
+                              value={
+                                carouselModeOverrides[rec.id] ||
+                                rec.carouselPublishMode ||
+                                'video_slideshow'
+                              }
+                              onChange={(e) =>
+                                setCarouselModeOverrides((prev) => ({
+                                  ...prev,
+                                  [rec.id]: e.target.value as CarouselPublishMode,
+                                }))
+                              }
+                              className="w-full px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-xs text-slate-900"
+                            >
+                              <option value="video_slideshow">
+                                Carrossel + Música Russa (MP4)
+                              </option>
+                              <option value="photo_carousel">
+                                Carrossel Nativo de Fotos (Swipe)
+                              </option>
+                            </select>
+                          </div>
                         </div>
-                      )}
+
+                        <div className="flex flex-wrap items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            disabled={busyId === rec.id}
+                            onClick={() => void handlePublishTikTok(rec, 'inbox_draft')}
+                            className="min-h-[32px] px-3 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-xs font-medium text-slate-700 disabled:opacity-50"
+                          >
+                            Enviar como Rascunho
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </article>

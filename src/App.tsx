@@ -15,10 +15,7 @@ import {
 } from './lib/api';
 import { auth } from './lib/firebase';
 import {
-  deleteTikTokBackupFromCloud,
   ensureCloudUserProfile,
-  loadTikTokBackupFromCloud,
-  saveTikTokBackupToCloud,
   signInCloudBackup,
   signOutCloudBackup,
   syncExpRecordsWithCloud,
@@ -30,15 +27,18 @@ import type {
   ExpRecordsResponse,
   GuildItem,
   GuildsResponse,
-  TikTokLoginResult,
-  TikTokQrState,
   TikTokStatusResponse,
 } from './types';
 
 type AppView = 'welcome' | 'dashboard' | 'panel' | 'tiktok' | 'exp';
 
 export default function App() {
-  const [view, setView] = useState<AppView>('welcome');
+  const [view, setView] = useState<AppView>(() => {
+    const params = new URLSearchParams(window.location.search);
+    const v = params.get('view');
+    if (v === 'tiktok' || v === 'exp' || v === 'dashboard') return v;
+    return 'welcome';
+  });
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [config, setConfig] = useState<ConfigStatus | null>(null);
   const [managedGuilds, setManagedGuilds] = useState<GuildItem[]>([]);
@@ -53,12 +53,11 @@ export default function App() {
   const [firebaseReady, setFirebaseReady] = useState(false);
   const [cloudRestoredNotice, setCloudRestoredNotice] = useState<string | null>(null);
 
-  // TikTok connection state (autotok QR login)
+  // TikTok connection state (Zernio OAuth API)
   const [tiktokStatus, setTiktokStatus] = useState<TikTokStatusResponse | null>(null);
-  const [tiktokQrState, setTiktokQrState] = useState<TikTokQrState | null>(null);
   const [tiktokLoading, setTiktokLoading] = useState(false);
-  const [tiktokConnecting, setTiktokConnecting] = useState(false);
   const [tiktokError, setTiktokError] = useState<string | null>(null);
+  const [tiktokNotice, setTiktokNotice] = useState<string | null>(null);
 
   // EXP System state
   const [expRecords, setExpRecords] = useState<ExpRecordView[]>([]);
@@ -67,24 +66,13 @@ export default function App() {
 
   const activePollStateRef = useRef<string | null>(null);
   const pollTimerRef = useRef<number | null>(null);
-  const tiktokQrPollingRef = useRef<boolean>(false);
-  const tiktokPollTimerRef = useRef<number | null>(null);
   const lastCloudSyncKeyRef = useRef<string>('');
-  const lastTikTokCloudSyncKeyRef = useRef<string>('');
 
   const stopOAuthPolling = useCallback(() => {
     activePollStateRef.current = null;
     if (pollTimerRef.current !== null) {
       window.clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
-    }
-  }, []);
-
-  const stopTikTokPolling = useCallback(() => {
-    tiktokQrPollingRef.current = false;
-    if (tiktokPollTimerRef.current !== null) {
-      window.clearInterval(tiktokPollTimerRef.current);
-      tiktokPollTimerRef.current = null;
     }
   }, []);
 
@@ -176,29 +164,6 @@ export default function App() {
     [loadConfig, loadExpRecords, loadGuilds, loadTikTokStatus, stopOAuthPolling],
   );
 
-  const completeTikTokLogin = useCallback(async () => {
-    stopTikTokPolling();
-    setTiktokConnecting(false);
-    setTiktokQrState(null);
-    setTiktokError(null);
-    const updated = await loadTikTokStatus();
-    if (
-      updated?.connected &&
-      updated.account &&
-      updated.encryptedBackup &&
-      firebaseUser &&
-      config?.user?.id
-    ) {
-      await saveTikTokBackupToCloud(
-        firebaseUser,
-        config.user.id,
-        updated.account.username,
-        updated.account.displayName,
-        updated.encryptedBackup,
-      ).catch(() => {});
-    }
-  }, [config?.user?.id, firebaseUser, loadTikTokStatus, stopTikTokPolling]);
-
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (fbUser) => {
       setFirebaseUser(fbUser);
@@ -208,20 +173,47 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedView = params.get('view');
+    const tiktokOAuthStatus = params.get('tiktok_oauth');
+    const tiktokOAuthUser = params.get('username');
+    const tiktokOAuthErr = params.get('error');
+
+    if (tiktokOAuthStatus === 'success') {
+      setTiktokNotice(
+        tiktokOAuthUser
+          ? `Conta @${tiktokOAuthUser} conectada com sucesso via Zernio OAuth!`
+          : 'Conta TikTok conectada com sucesso via Zernio OAuth!',
+      );
+      setTiktokError(null);
+    } else if (tiktokOAuthStatus === 'error') {
+      setTiktokError(tiktokOAuthErr || 'Não foi possível concluir a conexão OAuth com o TikTok.');
+    }
+
+    if (requestedView || tiktokOAuthStatus) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     void (async () => {
       const status = await loadConfig();
       if (status?.authenticated) {
-        setView('dashboard');
+        if (requestedView === 'tiktok') {
+          setView('tiktok');
+        } else if (requestedView === 'exp') {
+          setView('exp');
+        } else {
+          setView('dashboard');
+        }
         await Promise.all([loadGuilds(), loadTikTokStatus(), loadExpRecords()]);
       } else {
         await loadTikTokStatus();
       }
     })();
+
     return () => {
       stopOAuthPolling();
-      stopTikTokPolling();
     };
-  }, [loadConfig, loadExpRecords, loadGuilds, loadTikTokStatus, stopOAuthPolling, stopTikTokPolling]);
+  }, [loadConfig, loadExpRecords, loadGuilds, loadTikTokStatus, stopOAuthPolling]);
 
   useEffect(() => {
     if (!firebaseReady || !config?.authenticated || !config.user?.id || managedGuilds.length === 0) {
@@ -275,56 +267,6 @@ export default function App() {
     managedGuilds,
   ]);
 
-  useEffect(() => {
-    if (!firebaseReady || !firebaseUser || !config?.authenticated || !config.user?.id || !tiktokStatus) {
-      return;
-    }
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      return;
-    }
-
-    const syncKey = `${config.user.id}:${firebaseUser.uid}:${tiktokStatus.connected ? tiktokStatus.account?.openId ?? '1' : '0'}`;
-    if (lastTikTokCloudSyncKeyRef.current === syncKey) return;
-    lastTikTokCloudSyncKeyRef.current = syncKey;
-
-    void (async () => {
-      try {
-        if (tiktokStatus.connected && tiktokStatus.account && tiktokStatus.encryptedBackup) {
-          await saveTikTokBackupToCloud(
-            firebaseUser,
-            config.user!.id,
-            tiktokStatus.account.username,
-            tiktokStatus.account.displayName,
-            tiktokStatus.encryptedBackup,
-          );
-        } else if (!tiktokStatus.connected) {
-          const cloudBackup = await loadTikTokBackupFromCloud(firebaseUser);
-          if (cloudBackup?.encryptedBackup) {
-            const resp = await apiFetch('/api/tiktok/restore', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ encryptedBackup: cloudBackup.encryptedBackup }),
-            });
-            if (resp.ok) {
-              await loadTikTokStatus();
-            } else if (resp.status === 400) {
-              await deleteTikTokBackupFromCloud(firebaseUser).catch(() => {});
-            }
-          }
-        }
-      } catch {
-        // Non-blocking background sync
-      }
-    })();
-  }, [
-    config?.authenticated,
-    config?.user,
-    firebaseReady,
-    firebaseUser,
-    loadTikTokStatus,
-    tiktokStatus,
-  ]);
-
   const pollOnce = useCallback(
     async (state: string) => {
       try {
@@ -354,29 +296,6 @@ export default function App() {
     },
     [completeOAuthLogin, stopOAuthPolling],
   );
-
-  const pollTikTokQrOnce = useCallback(async () => {
-    if (!tiktokQrPollingRef.current) return;
-    try {
-      const resp = await apiFetch('/api/tiktok/qr/status');
-      if (!resp.ok) return;
-      const data = (await resp.json()) as TikTokQrState;
-      setTiktokQrState(data);
-
-      if (data.status === 'connected') {
-        await completeTikTokLogin();
-      } else if (data.status === 'error') {
-        stopTikTokPolling();
-        setTiktokConnecting(false);
-        setTiktokError(data.error || 'Falha ao conectar conta TikTok via QR Code.');
-      } else if (data.status === 'expired') {
-        stopTikTokPolling();
-        setTiktokConnecting(false);
-      }
-    } catch {
-      // Ignore transient errors while polling QR status
-    }
-  }, [completeTikTokLogin, stopTikTokPolling]);
 
   const openDiscordOAuthPopup = useCallback(
     async (mode: 'invite' | 'login', guildId?: string) => {
@@ -412,8 +331,6 @@ export default function App() {
           return;
         }
 
-        // Start polling state so even if browser opens a new tab without window.opener or blocks 3P cookies,
-        // returning to this tab syncs the session automatically.
         activePollStateRef.current = state;
         const startedAt = Date.now();
         pollTimerRef.current = window.setInterval(() => {
@@ -434,255 +351,18 @@ export default function App() {
     [pollOnce, stopOAuthPolling],
   );
 
-  const handleConnectTikTok = useCallback(async () => {
-    stopTikTokPolling();
-    setTiktokConnecting(true);
-    setTiktokError(null);
-    setTiktokQrState({
-      active: true,
-      sessionId: null,
-      status: 'initializing',
-      qrImageUrl: null,
-      account: null,
-      error: null,
-      expiresAt: null,
-    });
-
-    try {
-      const resp = await apiFetch('/api/tiktok/qr/start', { method: 'POST' });
-      const data = (await resp.json().catch(() => ({}))) as TikTokQrState & { error?: string };
-
-      if (!resp.ok) {
-        setTiktokError(data.error || 'Não foi possível gerar o QR Code de login do TikTok.');
-        setTiktokConnecting(false);
-        setTiktokQrState(null);
-        return;
-      }
-
-      setTiktokQrState(data);
-
-      if (data.status === 'connected') {
-        await completeTikTokLogin();
-        return;
-      }
-
-      if (data.status === 'error') {
-        setTiktokError(data.error || 'Não foi possível carregar o QR Code do TikTok.');
-        setTiktokConnecting(false);
-        return;
-      }
-
-      tiktokQrPollingRef.current = true;
-      const startedAt = Date.now();
-      tiktokPollTimerRef.current = window.setInterval(() => {
-        if (Date.now() - startedAt > 4 * 60 * 1000) {
-          stopTikTokPolling();
-          setTiktokConnecting(false);
-          return;
-        }
-        void pollTikTokQrOnce();
-      }, 1300);
-    } catch {
-      setTiktokError('Erro de comunicação ao gerar QR Code do TikTok.');
-      setTiktokConnecting(false);
-      setTiktokQrState(null);
-    }
-  }, [completeTikTokLogin, pollTikTokQrOnce, stopTikTokPolling]);
-
-  const handleCancelTikTokQr = useCallback(async () => {
-    stopTikTokPolling();
-    setTiktokConnecting(false);
-    setTiktokQrState(null);
-    setTiktokError(null);
-    await apiFetch('/api/tiktok/qr/cancel', { method: 'POST' }).catch(() => {});
-  }, [stopTikTokPolling]);
-
   const handleDisconnectTikTok = useCallback(async () => {
-    stopTikTokPolling();
-    setTiktokQrState(null);
     setTiktokLoading(true);
     setTiktokError(null);
     try {
       await apiFetch('/api/tiktok/disconnect', { method: 'POST' });
-      if (firebaseUser) {
-        await deleteTikTokBackupFromCloud(firebaseUser).catch(() => {});
-      }
-      lastTikTokCloudSyncKeyRef.current = '';
       await loadTikTokStatus();
     } catch {
       setTiktokError('Erro ao desconectar conta TikTok.');
     } finally {
       setTiktokLoading(false);
     }
-  }, [firebaseUser, loadTikTokStatus, stopTikTokPolling]);
-
-  const handleLoginTikTokCredentials = useCallback(
-    async (credentials: { usernameOrEmail: string; password: string }): Promise<TikTokLoginResult> => {
-      setTiktokLoading(true);
-      setTiktokError(null);
-      try {
-        const resp = await apiFetch('/api/tiktok/login/credentials', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(credentials),
-        });
-        const data = (await resp.json().catch(() => ({}))) as TikTokLoginResult;
-        if (!resp.ok || !data.ok) {
-          const errMsg =
-            data.error ||
-            (resp.status === 401
-              ? 'Conecte sua conta Discord primeiro.'
-              : 'Não foi possível autenticar no TikTok. Se sua conta foi criada pelo Google, use a aba Cookie de Sessão.');
-          if (!data.requires2Fa) {
-            setTiktokError(errMsg);
-          }
-          return { ...data, ok: false, error: errMsg };
-        }
-
-        if (data.connected && data.account) {
-          await completeTikTokLogin();
-        }
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erro de comunicação ao entrar no TikTok.';
-        setTiktokError(msg);
-        return { ok: false, error: msg };
-      } finally {
-        setTiktokLoading(false);
-      }
-    },
-    [completeTikTokLogin],
-  );
-
-  const handleSubmitTikTok2Fa = useCallback(
-    async (params: { sessionId: string; code: string }): Promise<TikTokLoginResult> => {
-      setTiktokLoading(true);
-      setTiktokError(null);
-      try {
-        const resp = await apiFetch('/api/tiktok/login/2fa', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(params),
-        });
-        const data = (await resp.json().catch(() => ({}))) as TikTokLoginResult;
-        if (!resp.ok || !data.ok) {
-          setTiktokError(data.error || 'Código de verificação incorreto ou expirado.');
-          return data;
-        }
-
-        if (data.connected && data.account) {
-          await completeTikTokLogin();
-        }
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erro ao enviar código de verificação.';
-        setTiktokError(msg);
-        return { ok: false, error: msg };
-      } finally {
-        setTiktokLoading(false);
-      }
-    },
-    [completeTikTokLogin],
-  );
-
-  const handleCancelTikTok2Fa = useCallback(async (sessionId: string): Promise<void> => {
-    await apiFetch('/api/tiktok/login/2fa/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
-    }).catch(() => {});
-  }, []);
-
-  const handleLoginTikTokCookie = useCallback(
-    async (params: { sessionId: string; datacenter?: string }): Promise<TikTokLoginResult> => {
-      setTiktokLoading(true);
-      setTiktokError(null);
-      try {
-        const resp = await apiFetch('/api/tiktok/login/cookie', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(params),
-        });
-        const data = (await resp.json().catch(() => ({}))) as TikTokLoginResult;
-        if (!resp.ok || !data.ok) {
-          setTiktokError(data.error || 'Não foi possível validar o cookie de sessão informado.');
-          return data;
-        }
-
-        if (data.connected && data.account) {
-          await completeTikTokLogin();
-        }
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erro ao conectar via cookie do TikTok.';
-        setTiktokError(msg);
-        return { ok: false, error: msg };
-      } finally {
-        setTiktokLoading(false);
-      }
-    },
-    [completeTikTokLogin],
-  );
-
-  const handleLoginTikTokWebhook = useCallback(
-    async (params: { username: string; webhookUrl: string; apiKey?: string }): Promise<TikTokLoginResult> => {
-      setTiktokLoading(true);
-      setTiktokError(null);
-      try {
-        const resp = await apiFetch('/api/tiktok/login/webhook', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(params),
-        });
-        const data = (await resp.json().catch(() => ({}))) as TikTokLoginResult;
-        if (!resp.ok || !data.ok) {
-          setTiktokError(data.error || 'Não foi possível configurar o provedor webhook.');
-          return data;
-        }
-
-        if (data.connected && data.account) {
-          await completeTikTokLogin();
-        }
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erro ao conectar via provedor webhook.';
-        setTiktokError(msg);
-        return { ok: false, error: msg };
-      } finally {
-        setTiktokLoading(false);
-      }
-    },
-    [completeTikTokLogin],
-  );
-
-  const handleConnectTikTokAutoTok = useCallback(
-    async (params: { sessionId: string; accountName?: string; datacenter?: string }): Promise<TikTokLoginResult> => {
-      setTiktokLoading(true);
-      setTiktokError(null);
-      try {
-        const resp = await apiFetch('/api/tiktok/accounts/connect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(params),
-        });
-        const data = (await resp.json().catch(() => ({}))) as TikTokLoginResult;
-        if (!resp.ok || !data.ok) {
-          const errMsg = data.error || 'Não foi possível autenticar a sessão via AutoTok.';
-          setTiktokError(errMsg);
-          return { ok: false, error: errMsg };
-        }
-        await completeTikTokLogin();
-        return data;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Erro de comunicação ao conectar via AutoTok.';
-        setTiktokError(msg);
-        return { ok: false, error: msg };
-      } finally {
-        setTiktokLoading(false);
-      }
-    },
-    [completeTikTokLogin],
-  );
+  }, [loadTikTokStatus]);
 
   const handleSelectTikTokAccount = useCallback(
     async (accountId: string): Promise<void> => {
@@ -701,13 +381,18 @@ export default function App() {
   const handleDeleteTikTokAccount = useCallback(
     async (accountId: string): Promise<void> => {
       setTiktokLoading(true);
+      setTiktokError(null);
       try {
-        await apiFetch(`/api/tiktok/accounts/${encodeURIComponent(accountId)}`, {
+        const resp = await apiFetch(`/api/tiktok/accounts/${encodeURIComponent(accountId)}`, {
           method: 'DELETE',
         });
+        if (!resp.ok) {
+          const data = (await resp.json().catch(() => ({}))) as { error?: string };
+          setTiktokError(data.error || 'Não foi possível desconectar a conta no Zernio.');
+        }
         await loadTikTokStatus();
       } catch {
-        // Non-blocking
+        setTiktokError('Erro ao desconectar conta TikTok.');
       } finally {
         setTiktokLoading(false);
       }
@@ -722,17 +407,17 @@ export default function App() {
           method: 'POST',
         });
         const data = (await resp.json().catch(() => ({}))) as { valid: boolean; reason?: string };
+        await loadTikTokStatus();
         return data;
       } catch (err) {
         return {
           valid: false,
-          reason: err instanceof Error ? err.message : 'Erro ao verificar conta no AutoTok.',
+          reason: err instanceof Error ? err.message : 'Erro ao verificar conta no Zernio.',
         };
       }
     },
-    [],
+    [loadTikTokStatus],
   );
-
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -754,6 +439,22 @@ export default function App() {
             ? event.data.error
             : 'Falha durante a autenticação com o Discord.',
         );
+      } else if (event.data?.type === 'ZERNIO_TIKTOK_AUTH_DONE') {
+        if (event.data?.ok) {
+          setTiktokNotice(
+            event.data?.username
+              ? `Conta @${event.data.username} conectada com sucesso via Zernio OAuth!`
+              : 'Conta TikTok conectada com sucesso via Zernio OAuth!',
+          );
+          setTiktokError(null);
+          void loadTikTokStatus();
+        } else {
+          setTiktokError(
+            typeof event.data?.error === 'string'
+              ? event.data.error
+              : 'Falha na autorização do TikTok via Zernio.',
+          );
+        }
       }
     };
 
@@ -769,9 +470,6 @@ export default function App() {
       if (pendingState) {
         void pollOnce(pendingState);
       }
-      if (tiktokQrPollingRef.current) {
-        void pollTikTokQrOnce();
-      }
     };
 
     window.addEventListener('message', handleMessage);
@@ -785,12 +483,7 @@ export default function App() {
       window.removeEventListener('focus', handleFocusSync);
       document.removeEventListener('visibilitychange', handleFocusSync);
     };
-  }, [
-    completeOAuthLogin,
-    pollOnce,
-    pollTikTokQrOnce,
-    stopOAuthPolling,
-  ]);
+  }, [completeOAuthLogin, loadTikTokStatus, pollOnce, stopOAuthPolling]);
 
   const handleLogout = useCallback(async () => {
     await apiFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
@@ -822,7 +515,6 @@ export default function App() {
       if (config?.user?.id) {
         await ensureCloudUserProfile(fbUser, config.user.id);
         lastCloudSyncKeyRef.current = '';
-        lastTikTokCloudSyncKeyRef.current = '';
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : '';
@@ -835,7 +527,6 @@ export default function App() {
   const handleUnlinkCloudBackup = useCallback(async () => {
     await signOutCloudBackup().catch(() => {});
     lastCloudSyncKeyRef.current = '';
-    lastTikTokCloudSyncKeyRef.current = '';
   }, []);
 
   const handleDrawerNavigate = useCallback(
@@ -910,10 +601,10 @@ export default function App() {
           tiktokStatus={tiktokStatus}
           accounts={tiktokStatus?.accounts ?? []}
           activeAccountId={tiktokStatus?.activeAccountId ?? null}
-          qrState={null}
           loading={tiktokLoading}
-          connecting={false}
           error={tiktokError}
+          notice={tiktokNotice}
+          onClearNotice={() => setTiktokNotice(null)}
           onOpenDrawer={() => setDrawerOpen(true)}
           onBackDashboard={() => setView('dashboard')}
           onLoginDiscord={() => void openDiscordOAuthPopup('login')}
@@ -937,6 +628,7 @@ export default function App() {
           loading={expLoading}
           tiktokConnected={tiktokConnected}
           tiktokAccounts={tiktokStatus?.accounts ?? []}
+          managedGuilds={managedGuilds}
           onRefresh={() => void loadExpRecords()}
           onOpenDrawer={() => setDrawerOpen(true)}
           onBackDashboard={() => setView('dashboard')}
@@ -1011,4 +703,3 @@ export default function App() {
     </>
   );
 }
-

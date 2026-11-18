@@ -838,6 +838,7 @@ export function ServerPanel({
             <ExpHistoryView
               embeddedInServerPanel
               fixedGuildId={guild.id}
+              fixedGuildName={guild.name}
               records={expRecords}
               nextExpCode={nextExpCode}
               loading={expLoading}

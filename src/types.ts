@@ -8,6 +8,7 @@ export interface DiscordUser {
 export interface ConfigStatus {
   oauthConfigured: boolean;
   botConfigured: boolean;
+  groqConfigured?: boolean;
   botStatus: {
     connected: boolean;
     botTag: string | null;
@@ -18,6 +19,21 @@ export interface ConfigStatus {
   user: DiscordUser | null;
   redirectUri: string;
 }
+
+export interface DemonicAiGenerationResult {
+  provider: 'groq' | 'gemini';
+  model: string;
+  title: string;
+  information: string;
+  additionalText: string;
+  insultText: string;
+  closingText: string;
+  watermarkText: string;
+  caption: string;
+  hashtags: string;
+  aiImagesBase64: string[];
+}
+
 
 export interface GuildItem {
   id: string;
@@ -60,59 +76,72 @@ export interface GuildWelcomeConfigResponse {
 
 export interface TikTokAccountInfo {
   id: string;
-  accountKey: string;
-  openId: string;
+  zernioAccountId: string;
+  zernioProfileId: string;
+  platform: 'tiktok';
   username: string;
   displayName: string;
   avatarUrl: string | null;
-  provider?: 'autotok' | 'webhook' | 'online_service';
-  isDefault?: boolean;
+  status: 'connected' | 'expired' | 'revoked';
+  healthIssues?: string[];
+  isDefault: boolean;
   connectedAt: string;
-  updatedAt?: string;
-  status?: 'active' | 'expired' | 'checking';
+  updatedAt: string;
 }
 
 export interface TikTokStatusResponse {
   configured: boolean;
   connected: boolean;
-  provider?: 'autotok' | 'webhook' | 'online_service';
+  provider: 'zernio';
   account: TikTokAccountInfo | null;
-  accounts?: TikTokAccountInfo[];
-  activeAccountId?: string | null;
-  encryptedBackup?: string | null;
+  accounts: TikTokAccountInfo[];
+  activeAccountId: string | null;
 }
 
-export interface TikTokLoginResult {
-  ok: boolean;
-  connected?: boolean;
-  account?: TikTokAccountInfo | null;
-  requires2Fa?: boolean;
-  sessionId?: string | null;
-  message?: string | null;
-  error?: string | null;
-  captchaRequired?: boolean;
-}
+export type ZernioPostStatus =
+  | 'draft'
+  | 'processing'
+  | 'published'
+  | 'partial'
+  | 'failed';
 
-export type TikTokQrPhase =
-  | 'idle'
-  | 'initializing'
-  | 'pending_qr'
-  | 'scanned_confirming'
-  | 'connected'
-  | 'expired'
-  | 'error';
-
-export interface TikTokQrState {
-  active: boolean;
-  sessionId: string | null;
-  status: TikTokQrPhase;
-  qrImageUrl: string | null;
-  account: TikTokAccountInfo | null;
+export interface ZernioPostHistoryItem {
+  id: string;
+  zernioPostId: string;
+  discordUserId: string;
+  accountId: string;
+  accountUsername: string;
+  expId: string | null;
+  expCode: string | null;
+  caption: string;
+  hashtags: string[];
+  status: ZernioPostStatus;
+  platformPostId: string | null;
+  platformPostUrl: string | null;
   error: string | null;
-  expiresAt: number | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type ExpFormat = 'carousel' | 'video';
+
+export type CarouselPublishMode = 'video_slideshow' | 'photo_carousel';
+
+export interface RussianMusicTrack {
+  id: string;
+  artist: string;
+  title: string;
+  previewUrl: string;
+  artworkUrl?: string | null;
+  durationSec?: number;
+}
+
+export interface ExpAudioTrackMeta {
+  id?: string;
+  artist: string;
+  title: string;
+  previewUrl?: string;
+}
 
 export type ExpStatus =
   | 'pending'
@@ -133,6 +162,15 @@ export interface ExpRecordView {
   description: string;
   whatHappened: string;
   whyWrong: string;
+  additionalInsults?: string;
+  title?: string;
+  information?: string;
+  additionalText?: string;
+  insultText?: string;
+  closingText?: string;
+  watermarkText?: string;
+  audioTrack?: ExpAudioTrackMeta | null;
+  carouselPublishMode?: CarouselPublishMode;
   mediaLinks: string[];
   otherLinks: string[];
   format: ExpFormat;
@@ -147,6 +185,7 @@ export interface ExpRecordView {
   tiktokPublishMode: string | null;
   tiktokStatusText: string | null;
   tiktokError: string | null;
+  tiktokPostUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 }

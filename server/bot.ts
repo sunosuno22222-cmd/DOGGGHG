@@ -579,6 +579,10 @@ function attachBotListeners(client: Client): void {
   client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       try {
+        if (interaction.customId.startsWith('exp_')) {
+          await handleExpButtonInteraction(interaction, client);
+          return;
+        }
         const handledByReg = await handleRegistrationButtonInteraction(interaction);
         if (handledByReg) return;
         const handledByExp = await handleExpButtonInteraction(interaction, client);
@@ -587,6 +591,15 @@ function attachBotListeners(client: Client): void {
         }
       } catch (err) {
         console.error('[Discord Bot] Erro no botão:', err);
+        const errPayload = {
+          content: 'Não foi possível processar esta ação no momento. Tente novamente.',
+          flags: MessageFlags.Ephemeral,
+        } as const;
+        if (interaction.deferred || interaction.replied) {
+          await interaction.followUp(errPayload).catch(() => {});
+        } else {
+          await interaction.reply(errPayload).catch(() => {});
+        }
       }
       return;
     }
@@ -608,6 +621,17 @@ function attachBotListeners(client: Client): void {
         }
       } catch (err) {
         console.error('[Discord Bot] Erro no modal:', err);
+        const errPayload = {
+          content: 'Ocorreu um erro ao processar o formulário enviado. Tente novamente.',
+          flags: MessageFlags.Ephemeral,
+        } as const;
+        if (interaction.deferred) {
+          await interaction.editReply({ content: errPayload.content }).catch(() => {});
+        } else if (interaction.replied) {
+          await interaction.followUp(errPayload).catch(() => {});
+        } else {
+          await interaction.reply(errPayload).catch(() => {});
+        }
       }
       return;
     }

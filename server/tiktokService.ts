@@ -1,34 +1,54 @@
+import fs from 'node:fs';
+import {
+  generateCarouselSlideshowVideo,
+  generateTikTokTestMedia,
+  TIKTOK_TEST_POST_CAPTION,
+} from './expMediaGenerator.ts';
+import {
+  EXP_HASHTAGS,
+  formatExpCode,
+  getExpMediaFilePath,
+  updateExpRecord,
+  type CarouselPublishMode,
+  type ExpAudioTrackMeta,
+  type ExpRecord,
+} from './expStore.ts';
+import { selectRandomPreferredTrack, selectRussianTrackForPost } from './tiktokMusic.ts';
+import {
+  isZernioConfigured,
+  publishPostViaZernio,
+  verifyZernioAccountHealth,
+  type TikTokPrivacyLevel,
+} from './zernioService.ts';
 import {
   getZernioAccount,
   getZernioAccounts,
   toPublicZernioInfo,
   type ZernioAccountRecord,
   type ZernioPublicAccountInfo,
-} from './zernioStore';
-import {
-  fetchZernioConnectUrl,
-  publishPostViaZernio,
-  verifyZernioAccountHealth,
-  syncZernioAccounts,
-} from './zernioService';
-import type { ExpRecord } from './expStore';
+} from './zernioStore.ts';
 
 export type TikTokConnectionRecord = ZernioAccountRecord;
 export type TikTokPublicAccountInfo = ZernioPublicAccountInfo;
 
+export type TikTokPublishMode = 'auto' | 'inbox_draft' | 'direct_private' | 'direct_public';
+
 export function isTikTokConfigured(): boolean {
-  return Boolean(process.env.ZERNIO_API_KEY?.trim());
+  return isZernioConfigured();
 }
 
 export function getTikTokAccounts(discordUserId?: string): ZernioAccountRecord[] {
   return getZernioAccounts(discordUserId);
 }
 
-export function getTikTokAccount(idOrKey: string): ZernioAccountRecord | null {
-  return getZernioAccount(idOrKey);
+export function getTikTokAccount(idOrKey: string, discordUserId?: string): ZernioAccountRecord | null {
+  return getZernioAccount(idOrKey, discordUserId);
 }
 
-export function getTikTokConnection(discordUserId: string, preferredId?: string | null): ZernioAccountRecord | null {
+export function getTikTokConnection(
+  discordUserId: string,
+  preferredId?: string | null,
+): ZernioAccountRecord | null {
   const accounts = getZernioAccounts(discordUserId);
   if (accounts.length === 0) return null;
   if (preferredId) {
@@ -54,95 +74,276 @@ export function toPublicTikTokInfo(record: ZernioAccountRecord | null): ZernioPu
   return toPublicZernioInfo(record);
 }
 
-export async function verifyTikTokAccountHealth(accountIdOrKey: string): Promise<{ valid: boolean; reason?: string }> {
-  return verifyZernioAccountHealth(accountIdOrKey);
+export async function verifyTikTokAccountHealth(
+  accountIdOrKey: string,
+  discordUserId: string,
+): Promise<{ valid: boolean; status?: 'connected' | 'expired' | 'revoked'; reason?: string }> {
+  return verifyZernioAccountHealth(accountIdOrKey, discordUserId);
+}
+
+function getSlideImagePaths(record: ExpRecord): string[] {
+  const slideFiles = record.generatedFiles.filter(
+    (f) => f.toLowerCase().endsWith('.jpg') && f !== 'video-preview.jpg',
+  );
+  return slideFiles
+    .map((f) => getExpMediaFilePath(record.id, f))
+    .filter((p): p is string => Boolean(p && fs.existsSync(p)));
+}
+
+async function resolveExpMp4WithRussianAudio(record: ExpRecord): Promise<{
+  videoPath: string;
+  trackMeta: ExpAudioTrackMeta | null;
+}> {
+  const existingMp4Name = record.generatedFiles.find((f) => f.toLowerCase().endsWith('.mp4'));
+  if (existingMp4Name) {
+    const mp4Path = getExpMediaFilePath(record.id, existingMp4Name);
+    if (mp4Path && fs.existsSync(mp4Path)) {
+      return { videoPath: mp4Path, trackMeta: record.audioTrack ?? null };
+    }
+  }
+
+  const slideFiles = record.generatedFiles.filter(
+    (f) => f.toLowerCase().endsWith('.jpg') && f !== 'video-preview.jpg',
+  );
+  if (slideFiles.length > 0) {
+    const russianTrack = await selectRussianTrackForPost(record.audioTrack ?? null).catch(() => null);
+    const outPath = await generateCarouselSlideshowVideo(
+      record.id,
+      slideFiles,
+      russianTrack?.localPath ?? null,
+    );
+    const trackMeta: ExpAudioTrackMeta | null = russianTrack
+      ? {
+          id: russianTrack.id,
+          artist: russianTrack.artist,
+          title: russianTrack.title,
+          previewUrl: russianTrack.previewUrl,
+        }
+      : record.audioTrack ?? null;
+
+    const updatedFiles = record.generatedFiles.includes('exp-carousel.mp4')
+      ? record.generatedFiles
+      : [...record.generatedFiles, 'exp-carousel.mp4'];
+    updateExpRecord(record.id, {
+      generatedFiles: updatedFiles,
+      audioTrack: trackMeta,
+    });
+
+    return { videoPath: outPath, trackMeta };
+  }
+
+  throw new Error('Nenhum arquivo de vídeo MP4 ou slide gerado encontrado para envio ao Zernio.');
+}
+
+function parseHashtagsInput(rawTags?: string[] | string | null, fallback = EXP_HASHTAGS): string[] {
+  if (Array.isArray(rawTags)) {
+    const cleaned = rawTags
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((t) => (t.startsWith('#') ? t : `#${t}`));
+    return cleaned.length > 0 ? cleaned : fallback.split(/\s+/);
+  }
+  if (typeof rawTags === 'string' && rawTags.trim()) {
+    const cleaned = rawTags
+      .split(/[\s,]+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((t) => (t.startsWith('#') ? t : `#${t}`));
+    return cleaned.length > 0 ? cleaned : fallback.split(/\s+/);
+  }
+  return fallback.split(/\s+/);
 }
 
 export async function publishExpToTikTok(
   record: ExpRecord,
-  discordUserId: string,
-  mode: 'auto' | 'manual' | 'test' = 'auto',
+  discordUserId: string | null,
+  mode: TikTokPublishMode = 'auto',
   targetAccountId?: string | null,
+  options?: {
+    caption?: string;
+    hashtags?: string[] | string;
+    privacyLevel?: TikTokPrivacyLevel;
+    carouselMode?: CarouselPublishMode;
+  },
 ): Promise<{
-  outcome: 'published' | 'inbox_draft' | 'awaiting_confirmation' | 'not_connected' | 'error';
+  outcome: 'published' | 'inbox_draft' | 'not_connected' | 'error';
   publishId?: string;
   publishMode?: string;
-  statusText?: string;
+  platformPostUrl?: string | null;
+  statusText: string;
   error?: string;
   trackArtist?: string | null;
   trackTitle?: string | null;
 }> {
+  if (!isZernioConfigured()) {
+    return {
+      outcome: 'error',
+      statusText: 'ZERNIO_API_KEY não configurada.',
+      error: 'Configure ZERNIO_API_KEY no ambiente do servidor para publicar no TikTok via Zernio.',
+    };
+  }
+
+  if (!discordUserId) {
+    return {
+      outcome: 'not_connected',
+      statusText: 'Nenhuma conta TikTok conectada.',
+      error: 'Conecte sua conta TikTok via Zernio na aba Contas TikTok antes de publicar.',
+    };
+  }
+
   const account = getTikTokConnection(discordUserId, targetAccountId);
   if (!account) {
     return {
       outcome: 'not_connected',
-      error: 'Nenhuma conta TikTok conectada via Zernio. Conecte sua conta em Contas TikTok.',
+      statusText: 'Conta TikTok não encontrada.',
+      error: targetAccountId
+        ? 'A conta selecionada não foi encontrada ou não pertence ao seu usuário.'
+        : 'Nenhuma conta TikTok conectada via Zernio. Conecte sua conta em Contas TikTok.',
     };
   }
 
-  const caption = `Exposição #${record.expNumber} — ${record.expCode}\n\nEnvolvido: ${record.involvedName}\nMotivo: ${record.description}`;
-  const hashtags = ['#5573exp', '#exposição', '#discord', '#fy', '#fyp'];
-  const videoUrl = record.mediaUrl || 'https://www.w3schools.com/html/mov_bbb.mp4';
+  const expCode = record.expCode || formatExpCode(record.expNumber || 1);
+  const titleSummary = record.title?.trim() || record.description;
+  const defaultCaption = `${expCode} — ${titleSummary}${
+    record.involvedName ? `\nEnvolvido(a): ${record.involvedName}` : ''
+  }`;
+  const caption = options?.caption?.trim() || defaultCaption;
+  const hashtags = parseHashtagsInput(options?.hashtags);
+
+  const privacyLevel: TikTokPrivacyLevel =
+    options?.privacyLevel ||
+    (mode === 'direct_private' ? 'SELF_ONLY' : 'PUBLIC_TO_EVERYONE');
+
+  const requestedCarouselMode: CarouselPublishMode =
+    options?.carouselMode || record.carouselPublishMode || 'video_slideshow';
+
+  const slidePaths = getSlideImagePaths(record);
+  const shouldUseNativePhotoCarousel =
+    requestedCarouselMode === 'photo_carousel' && slidePaths.length >= 1;
+
+  let videoPath: string | undefined;
+  let trackMeta: ExpAudioTrackMeta | null = record.audioTrack ?? null;
+
+  if (!shouldUseNativePhotoCarousel) {
+    try {
+      const resolved = await resolveExpMp4WithRussianAudio(record);
+      videoPath = resolved.videoPath;
+      trackMeta = resolved.trackMeta;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erro ao preparar mídia da exposição.';
+      return { outcome: 'error', statusText: msg, error: msg };
+    }
+  }
 
   const result = await publishPostViaZernio({
     discordUserId,
-    accountId: account.id || account.zernioAccountId,
-    videoUrl,
+    accountId: account.zernioAccountId,
+    videoPath,
+    imagePaths: shouldUseNativePhotoCarousel ? slidePaths : undefined,
+    mediaMode: shouldUseNativePhotoCarousel ? 'photo_carousel' : 'video',
+    filename: `${expCode.replace(/\s+/g, '-').toLowerCase()}.mp4`,
     caption,
     hashtags,
+    privacyLevel,
+    draft: mode === 'inbox_draft',
+    expId: record.id,
+    expCode,
   });
 
   if (!result.ok) {
     return {
       outcome: 'error',
-      error: result.error || 'Falha ao publicar vídeo via Zernio.',
+      publishId: result.postId,
+      publishMode: shouldUseNativePhotoCarousel ? 'zernio_photo_carousel' : 'zernio_api',
+      statusText: result.statusText,
+      error: result.error || 'Falha ao publicar conteúdo via Zernio.',
+      trackArtist: trackMeta?.artist ?? null,
+      trackTitle: trackMeta?.title ?? null,
+    };
+  }
+
+  if (result.status === 'draft' || mode === 'inbox_draft') {
+    return {
+      outcome: 'inbox_draft',
+      publishId: result.postId,
+      publishMode: 'inbox_draft',
+      platformPostUrl: result.platformPostUrl,
+      statusText: result.statusText,
+      trackArtist: trackMeta?.artist ?? null,
+      trackTitle: trackMeta?.title ?? null,
     };
   }
 
   return {
     outcome: 'published',
-    publishId: result.postId || `z_pub_${Date.now()}`,
-    publishMode: 'zernio_api',
-    statusText: result.statusText || `Publicado com sucesso no TikTok (@${account.username}) via Zernio.`,
-    trackArtist: 'Xishqa',
-    trackTitle: 'кончится лето',
+    publishId: result.postId,
+    publishMode: shouldUseNativePhotoCarousel ? 'zernio_photo_carousel' : 'zernio_api',
+    platformPostUrl: result.platformPostUrl,
+    statusText: result.statusText,
+    trackArtist: trackMeta?.artist ?? null,
+    trackTitle: trackMeta?.title ?? null,
   };
 }
 
-export async function publishTestPostToTikTok(discordUserId: string): Promise<{
+export async function publishTestPostToTikTok(
+  discordUserId: string,
+  accountId?: string | null,
+): Promise<{
   outcome: 'published' | 'error';
-  statusText?: string;
+  postId?: string;
+  platformPostUrl?: string | null;
+  statusText: string;
   error?: string;
   trackArtist?: string | null;
   trackTitle?: string | null;
 }> {
-  const account = getTikTokConnection(discordUserId);
+  if (!isZernioConfigured()) {
+    return {
+      outcome: 'error',
+      statusText: 'ZERNIO_API_KEY não configurada.',
+      error: 'Configure ZERNIO_API_KEY no servidor para executar a publicação de teste via Zernio.',
+    };
+  }
+
+  const account = getTikTokConnection(discordUserId, accountId);
   if (!account) {
     return {
       outcome: 'error',
+      statusText: 'Nenhuma conta TikTok conectada.',
       error: 'Nenhuma conta TikTok conectada via Zernio.',
     };
   }
 
+  const track = await selectRandomPreferredTrack().catch(() => null);
+  const testMedia = await generateTikTokTestMedia(track);
+
   const result = await publishPostViaZernio({
     discordUserId,
-    accountId: account.id || account.zernioAccountId,
-    videoUrl: 'https://www.w3schools.com/html/mov_bbb.mp4',
-    caption: 'Olá, eu sou 5573exp, sou uma conta vinculada a um bot do Discord, onde meu principal objetivo é explanar os dados informados no canal do servidor.',
-    hashtags: ['#5573exp', '#discord', '#fy'],
+    accountId: account.zernioAccountId,
+    videoPath: testMedia.videoPath,
+    filename: 'teste-zernio-5573exp.mp4',
+    caption: TIKTOK_TEST_POST_CAPTION,
+    hashtags: EXP_HASHTAGS.split(/\s+/),
+    privacyLevel: 'PUBLIC_TO_EVERYONE',
   });
 
   if (!result.ok) {
     return {
       outcome: 'error',
+      postId: result.postId,
+      statusText: result.statusText,
       error: result.error || 'Erro na publicação de teste via Zernio.',
+      trackArtist: testMedia.trackArtist,
+      trackTitle: testMedia.trackTitle,
     };
   }
 
   return {
     outcome: 'published',
-    statusText: result.statusText || `Publicação de teste enviada com sucesso (@${account.username}) via Zernio.`,
-    trackArtist: 'Xishqa',
-    trackTitle: 'кончится лето',
+    postId: result.postId,
+    platformPostUrl: result.platformPostUrl,
+    statusText: result.statusText,
+    trackArtist: testMedia.trackArtist,
+    trackTitle: testMedia.trackTitle,
   };
 }

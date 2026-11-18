@@ -35,7 +35,10 @@ import {
   type SessionRecord,
 } from './server/sessionStore.ts';
 import {
+  allocateUniqueExpNumber,
+  createExpRecord,
   formatExpCode,
+  getExpMediaDir,
   getExpMediaFilePath,
   getExpRecord,
   getNextPreviewExpNumber,
@@ -46,19 +49,47 @@ import {
   updateExpRecord,
   upsertRestoredExpRecord,
   validateExpNoPrivateData,
+  type CarouselPublishMode,
+  type ExpAudioTrackMeta,
   type ExpFormat,
   type ExpRecord,
 } from './server/expStore.ts';
-import { generateExpDraftPreview } from './server/expMediaGenerator.ts';
+import {
+  generateCarouselSlideshowVideo,
+  generateExpDraftPreview,
+  generateStudioCarouselSlides,
+} from './server/expMediaGenerator.ts';
+import {
+  listRussianMusicTracks,
+  selectRussianTrackForPost,
+} from './server/tiktokMusic.ts';
 import {
   isTikTokConfigured,
   getTikTokAccounts,
+  getTikTokConnection,
   verifyTikTokAccountHealth,
+  publishExpToTikTok,
   publishTestPostToTikTok,
   toPublicTikTokInfo,
+  type TikTokPublishMode,
 } from './server/tiktokService.ts';
-import { fetchZernioConnectUrl } from './server/zernioService.ts';
-import { deleteZernioAccount, setDefaultZernioAccount } from './server/zernioStore.ts';
+import {
+  completeZernioOAuthCallback,
+  disconnectZernioAccount,
+  pollZernioOAuthState,
+  refreshZernioPostStatus,
+  retryZernioPost,
+  startZernioTikTokConnect,
+  syncZernioAccountsForUser,
+  type TikTokPrivacyLevel,
+} from './server/zernioService.ts';
+import { getZernioPostHistory, setDefaultZernioAccount } from './server/zernioStore.ts';
+import {
+  applyDemonicFilterToImage,
+  extractFrameFromVideoBuffer,
+  generateDemonicExpContent,
+  isGroqConfigured,
+} from './server/groqService.ts';
 
 interface DiscordApiGuild {
   id: string;
@@ -430,7 +461,7 @@ function renderPopupClosePage(
 async function startServer(): Promise<void> {
   const app = express();
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '45mb' }));
   app.use(cookieParser());
 
   app.get('/api/health', (_req, res) => {
@@ -465,6 +496,7 @@ async function startServer(): Promise<void> {
     res.json({
       oauthConfigured: Boolean(applicationId && clientSecret),
       botConfigured: botStatus.configured,
+      groqConfigured: isGroqConfigured(),
       botStatus: {
         connected: botStatus.connected,
         botTag: botStatus.botTag,
@@ -1256,10 +1288,10 @@ async function startServer(): Promise<void> {
   });
 
   // ==========================================
-  // TikTok Connection Routes (Powered by Zernio API)
+  // TikTok Connection & Publishing Routes (Powered by Zernio API)
   // ==========================================
 
-  app.get('/api/tiktok/status', (req, res) => {
+  app.get('/api/tiktok/status', async (req, res) => {
     const auth = getSessionFromRequest(req);
     const configured = isTikTokConfigured();
 
@@ -1271,12 +1303,11 @@ async function startServer(): Promise<void> {
         account: null,
         accounts: [],
         activeAccountId: null,
-        encryptedBackup: null,
       });
       return;
     }
 
-    const accounts = getTikTokAccounts(auth.session.user.id);
+    const accounts = await syncZernioAccountsForUser(auth.session.user.id);
     const publicAccounts = accounts.map(toPublicTikTokInfo).filter(Boolean);
     const active = accounts.find((a) => a.isDefault) || accounts[0] || null;
 
@@ -1287,17 +1318,16 @@ async function startServer(): Promise<void> {
       account: toPublicTikTokInfo(active),
       accounts: publicAccounts,
       activeAccountId: active ? (active.id || active.zernioAccountId) : null,
-      encryptedBackup: null,
     });
   });
 
-  app.get('/api/tiktok/accounts', (req, res) => {
+  app.get('/api/tiktok/accounts', async (req, res) => {
     const auth = getSessionFromRequest(req);
     if (!auth) {
       res.json({ accounts: [], activeAccountId: null });
       return;
     }
-    const accounts = getTikTokAccounts(auth.session.user.id);
+    const accounts = await syncZernioAccountsForUser(auth.session.user.id);
     const publicAccounts = accounts.map(toPublicTikTokInfo).filter(Boolean);
     const active = accounts.find((a) => a.isDefault) || accounts[0] || null;
     res.json({
@@ -1313,40 +1343,126 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const origin = (req.body?.origin || req.get('origin') || 'http://localhost:3000').replace(/\/+$/, '');
-    const redirectUri = `${origin}/?view=tiktok`;
+    const rawOrigin = typeof req.body?.origin === 'string' ? req.body.origin.trim() : '';
+    const origin =
+      rawOrigin && isAllowedOrigin(rawOrigin)
+        ? rawOrigin.replace(/\/+$/, '')
+        : (process.env.APP_URL || 'http://localhost:3000').trim().replace(/\/+$/, '');
 
-    const result = await fetchZernioConnectUrl(auth.session.user.id, redirectUri);
-    if (!result.ok || !result.url) {
-      // If Zernio API key is not configured or network error, provide simulation connection for dev/test
-      const mockAccountId = `z_acc_5573exp_${Date.now().toString().slice(-6)}`;
-      const mockRecord = {
-        id: mockAccountId,
-        discordUserId: auth.session.user.id,
-        zernioAccountId: mockAccountId,
-        platform: 'tiktok',
-        username: '5573exp',
-        displayName: '5573exp',
-        avatarUrl: null,
-        status: 'connected' as const,
-        isDefault: true,
-        connectedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      import('./server/zernioStore.ts').then(({ saveZernioAccount }) => {
-        saveZernioAccount(mockRecord);
-      });
-
-      res.json({
-        ok: true,
-        connected: true,
-        account: mockRecord,
-        statusText: 'Conta conectada com sucesso via Zernio API [Modo Simulação].',
+    const callbackBaseUrl = `${origin}/api/tiktok/oauth/callback`;
+    const result = await startZernioTikTokConnect(auth.session.user.id, callbackBaseUrl);
+    if (!result.ok || !result.authUrl) {
+      res.status(isTikTokConfigured() ? 400 : 503).json({
+        ok: false,
+        error: result.error || 'Não foi possível gerar o link de autorização OAuth do Zernio.',
       });
       return;
     }
 
-    res.json({ ok: true, url: result.url });
+    res.json({ ok: true, url: result.authUrl, state: result.state });
+  });
+
+  app.get('/api/tiktok/oauth/poll', (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ completed: false, error: 'Usuário não autenticado.' });
+      return;
+    }
+    const state = typeof req.query.state === 'string' ? req.query.state.trim() : '';
+    if (!state) {
+      res.status(400).json({ completed: false });
+      return;
+    }
+    const polled = pollZernioOAuthState(state);
+    res.json({
+      completed: polled.completed,
+      status: polled.status,
+      account: polled.account ? toPublicTikTokInfo(polled.account) : null,
+      error: polled.error ?? null,
+    });
+  });
+
+  app.get('/api/tiktok/oauth/callback', async (req, res) => {
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const accountId =
+      typeof req.query.accountId === 'string'
+        ? req.query.accountId
+        : typeof req.query.account_id === 'string'
+          ? req.query.account_id
+          : undefined;
+    const username = typeof req.query.username === 'string' ? req.query.username : undefined;
+    const error = typeof req.query.error === 'string' ? req.query.error : undefined;
+    const errorDescription =
+      typeof req.query.error_description === 'string'
+        ? req.query.error_description
+        : typeof req.query.message === 'string'
+          ? req.query.message
+          : undefined;
+
+    const result = await completeZernioOAuthCallback({
+      state,
+      accountId,
+      username,
+      error,
+      errorDescription,
+    });
+
+    const payloadJson = JSON.stringify({
+      type: 'ZERNIO_TIKTOK_AUTH_DONE',
+      ok: result.ok,
+      username: result.account?.username || null,
+      error: result.error || null,
+    });
+
+    const safeHtml = (val: string) =>
+      val
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+
+    const redirectTarget = result.ok
+      ? `/?view=tiktok&tiktok_oauth=success${result.account?.username ? `&username=${encodeURIComponent(result.account.username)}` : ''}`
+      : `/?view=tiktok&tiktok_oauth=error&error=${encodeURIComponent(result.error || 'Falha na autorização TikTok')}`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(`<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>Conexão TikTok · Zernio OAuth</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #FAFAFA; color: #0f172a; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 24px; }
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 24px 28px; max-width: 420px; width: 100%; text-align: center; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    p { font-size: 14px; color: #475569; margin: 0 0 18px; line-height: 1.5; }
+    a { display: inline-block; padding: 10px 16px; border-radius: 8px; background: #0f172a; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${result.ok ? 'TikTok conectado com sucesso!' : 'Não foi possível conectar o TikTok'}</h1>
+    <p>${result.ok ? `Conta @${safeHtml(result.account?.username || 'tiktok')} autorizada via Zernio OAuth.` : safeHtml(result.error || 'Erro desconhecido.')}</p>
+    <a href="${safeHtml(redirectTarget)}">Voltar ao painel</a>
+  </div>
+  <script>
+    (function () {
+      var msg = ${payloadJson};
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(msg, '*');
+          setTimeout(function () { window.close(); }, 600);
+          return;
+        }
+      } catch (e) {}
+      setTimeout(function () {
+        window.location.replace(${JSON.stringify(redirectTarget)});
+      }, 900);
+    })();
+  </script>
+</body>
+</html>`);
   });
 
   app.post('/api/tiktok/accounts/:id/select', (req, res) => {
@@ -1356,7 +1472,11 @@ async function startServer(): Promise<void> {
       return;
     }
     const ok = setDefaultZernioAccount(req.params.id, auth.session.user.id);
-    res.json({ ok });
+    if (!ok) {
+      res.status(404).json({ ok: false, error: 'Conta não encontrada ou sem permissão.' });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   app.delete('/api/tiktok/accounts/:id', async (req, res) => {
@@ -1365,8 +1485,12 @@ async function startServer(): Promise<void> {
       res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
       return;
     }
-    const ok = deleteZernioAccount(req.params.id, auth.session.user.id);
-    res.json({ ok });
+    const result = await disconnectZernioAccount(req.params.id, auth.session.user.id);
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
   });
 
   app.post('/api/tiktok/accounts/:id/verify', async (req, res) => {
@@ -1375,7 +1499,7 @@ async function startServer(): Promise<void> {
       res.status(401).json({ error: 'Conecte sua conta Discord primeiro.' });
       return;
     }
-    const result = await verifyTikTokAccountHealth(req.params.id);
+    const result = await verifyTikTokAccountHealth(req.params.id, auth.session.user.id);
     res.json(result);
   });
 
@@ -1386,8 +1510,9 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const result = await publishTestPostToTikTok(auth.session.user.id);
-    res.json(result);
+    const accountId = typeof req.body?.accountId === 'string' ? req.body.accountId : undefined;
+    const result = await publishTestPostToTikTok(auth.session.user.id, accountId);
+    res.status(result.outcome === 'published' ? 200 : 400).json(result);
   });
 
   app.post('/api/tiktok/disconnect', async (req, res) => {
@@ -1399,40 +1524,85 @@ async function startServer(): Promise<void> {
 
     const accounts = getTikTokAccounts(auth.session.user.id);
     for (const acc of accounts) {
-      deleteZernioAccount(acc.id, auth.session.user.id);
+      await disconnectZernioAccount(acc.id, auth.session.user.id);
     }
     res.json({ ok: true });
   });
 
-  app.post('/api/tiktok/restore', async (req, res) => {
+  // Zernio EXP Publishing Status Consultation & History
+  app.get('/api/tiktok/posts', (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+    res.json({ posts: getZernioPostHistory(auth.session.user.id) });
+  });
+
+  app.get('/api/tiktok/posts/:postId/status', async (req, res) => {
     const auth = getSessionFromRequest(req);
     if (!auth) {
       res.status(401).json({ error: 'Usuário não autenticado.' });
       return;
     }
 
-    const body = (req.body || {}) as { encryptedBackup?: string };
-    if (typeof body.encryptedBackup !== 'string' || !body.encryptedBackup) {
-      res.status(400).json({ error: 'Backup ausente.' });
+    const result = await refreshZernioPostStatus(req.params.postId, auth.session.user.id);
+    if (!result.ok || !result.post) {
+      res.status(400).json(result);
       return;
     }
 
-    const decrypted = decryptTikTokPayload(body.encryptedBackup);
-    if (!decrypted || decrypted.discordUserId !== auth.session.user.id) {
-      res.status(400).json({ error: 'Backup TikTok inválido ou incompatível com a sessão atual.' });
+    if (result.post.expId) {
+      const expRec = getExpRecord(result.post.expId);
+      if (expRec) {
+        updateExpRecord(expRec.id, {
+          status:
+            result.post.status === 'published'
+              ? 'published_tiktok'
+              : result.post.status === 'failed'
+                ? 'tiktok_error'
+                : result.post.status === 'draft'
+                  ? 'tiktok_inbox'
+                  : expRec.status,
+          tiktokPostUrl: result.post.platformPostUrl ?? expRec.tiktokPostUrl ?? null,
+          tiktokError: result.post.error ?? null,
+        });
+      }
+    }
+
+    res.json(result);
+  });
+
+  app.post('/api/tiktok/posts/:postId/retry', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
       return;
     }
 
-    if (!getTikTokConnection(auth.session.user.id)) {
-      saveTikTokConnection(decrypted);
-      await syncRecordToAutotokStore(decrypted).catch(() => {});
+    const result = await retryZernioPost(req.params.postId, auth.session.user.id);
+    if (!result.ok) {
+      res.status(400).json(result);
+      return;
     }
 
-    res.json({
-      ok: true,
-      connected: true,
-      account: toPublicTikTokInfo(getTikTokConnection(auth.session.user.id)),
-    });
+    if (result.post?.expId) {
+      const expRec = getExpRecord(result.post.expId);
+      if (expRec) {
+        updateExpRecord(expRec.id, {
+          status:
+            result.post.status === 'published'
+              ? 'published_tiktok'
+              : result.post.status === 'failed'
+                ? 'tiktok_error'
+                : expRec.status,
+          tiktokPostUrl: result.post.platformPostUrl ?? expRec.tiktokPostUrl ?? null,
+          tiktokError: result.post.error ?? null,
+        });
+      }
+    }
+
+    res.json(result);
   });
 
   // ==========================================
@@ -1476,8 +1646,16 @@ async function startServer(): Promise<void> {
       return;
     }
 
-    const authorized = await authorizeGuildAdmin(req, res, record.guildId);
-    if (!authorized) return;
+    if (record.guildId === 'web-studio') {
+      const auth = getSessionFromRequest(req);
+      if (!auth || auth.session.user.id !== record.requesterId) {
+        res.status(403).json({ error: 'Sem permissão para acessar esta mídia.' });
+        return;
+      }
+    } else {
+      const authorized = await authorizeGuildAdmin(req, res, record.guildId);
+      if (!authorized) return;
+    }
 
     const filePath = getExpMediaFilePath(record.id, req.params.filename);
     if (!filePath || !fs.existsSync(filePath)) {
@@ -1511,13 +1689,17 @@ async function startServer(): Promise<void> {
         ? req.query.guildId.trim()
         : null;
 
-    if (filterGuildId && !adminGuildIds.has(filterGuildId)) {
+    if (filterGuildId && filterGuildId !== 'web-studio' && !adminGuildIds.has(filterGuildId)) {
       res.status(403).json({ error: 'Sem permissão administrativa neste servidor.' });
       return;
     }
 
     const records = listExpRecords(filterGuildId || undefined)
-      .filter((r) => adminGuildIds.has(r.guildId))
+      .filter(
+        (r) =>
+          (r.guildId === 'web-studio' && r.requesterId === auth.session.user.id) ||
+          adminGuildIds.has(r.guildId),
+      )
       .map((r) => ({
         id: r.id,
         guildId: r.guildId,
@@ -1528,6 +1710,15 @@ async function startServer(): Promise<void> {
         description: r.description,
         whatHappened: r.whatHappened,
         whyWrong: r.whyWrong,
+        additionalInsults: r.additionalInsults ?? '',
+        title: r.title ?? r.description,
+        information: r.information ?? r.whatHappened,
+        additionalText: r.additionalText ?? r.whyWrong,
+        insultText: r.insultText ?? r.additionalInsults ?? '',
+        closingText: r.closingText ?? '',
+        watermarkText: r.watermarkText ?? '',
+        audioTrack: r.audioTrack ?? null,
+        carouselPublishMode: r.carouselPublishMode ?? 'video_slideshow',
         mediaLinks: r.mediaLinks,
         otherLinks: r.otherLinks,
         format: r.format,
@@ -1542,6 +1733,7 @@ async function startServer(): Promise<void> {
         tiktokPublishMode: r.tiktokPublishMode,
         tiktokStatusText: r.tiktokStatusText,
         tiktokError: r.tiktokError,
+        tiktokPostUrl: r.tiktokPostUrl ?? null,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
       }));
@@ -1582,6 +1774,14 @@ async function startServer(): Promise<void> {
           description: r.description,
           whatHappened: r.whatHappened || '',
           whyWrong: r.whyWrong || '',
+          title: r.title,
+          information: r.information,
+          additionalText: r.additionalText,
+          insultText: r.insultText,
+          closingText: r.closingText,
+          watermarkText: r.watermarkText,
+          audioTrack: r.audioTrack,
+          carouselPublishMode: r.carouselPublishMode,
           mediaLinks: Array.isArray(r.mediaLinks) ? r.mediaLinks : [],
           otherLinks: Array.isArray(r.otherLinks) ? r.otherLinks : [],
           format: r.format === 'video' ? 'video' : 'carousel',
@@ -1607,6 +1807,498 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, nextExpNumber: getNextPreviewExpNumber() });
   });
 
+  async function decodeStudioMedia(mediaItemsBase64: unknown): Promise<Buffer[]> {
+    if (!Array.isArray(mediaItemsBase64)) return [];
+    const out: Buffer[] = [];
+    for (const item of mediaItemsBase64.slice(0, 3)) {
+      if (typeof item !== 'string' || !item.trim()) continue;
+      const isVideo = item.startsWith('data:video/');
+      const cleaned = item.replace(/^data:(image|video)\/[a-zA-Z0-9+.-]+;base64,/, '').trim();
+      if (!cleaned) continue;
+      try {
+        const rawBuf = Buffer.from(cleaned, 'base64');
+        if (rawBuf.byteLength > 100 && rawBuf.byteLength <= 35 * 1024 * 1024) {
+          if (isVideo) {
+            const frame = await extractFrameFromVideoBuffer(rawBuf).catch(() => null);
+            if (frame) out.push(frame);
+          } else {
+            out.push(rawBuf);
+          }
+        }
+      } catch {
+        // Ignore malformed media
+      }
+    }
+    return out;
+  }
+
+  // AI demonic content generator powered by Groq (Llama 3.3 70B) with Gemini fallback
+  app.post('/api/exp/ai/generate', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+
+    try {
+      const body = (req.body || {}) as {
+        involvedName?: string;
+        promptTopic?: string;
+        currentTitle?: string;
+        currentInfo?: string;
+        currentAdditional?: string;
+        currentInsult?: string;
+        generateImages?: boolean;
+        expCode?: string;
+      };
+
+      const result = await generateDemonicExpContent({
+        involvedName: body.involvedName,
+        promptTopic: body.promptTopic,
+        currentTitle: body.currentTitle,
+        currentInfo: body.currentInfo,
+        currentAdditional: body.currentAdditional,
+        currentInsult: body.currentInsult,
+        generateImages: body.generateImages !== false,
+        expCode: body.expCode || formatExpCode(getNextPreviewExpNumber()),
+      });
+
+      res.json({ ok: true, result });
+    } catch (err) {
+      console.error('[API /api/exp/ai/generate] Error:', err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Falha ao gerar conteúdo demoníaco com IA.',
+      });
+    }
+  });
+
+  // Extract a high-res poster frame from an uploaded video file (MP4/WebM)
+  app.post('/api/exp/media/extract-frame', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+
+    try {
+      const { videoBase64 } = (req.body || {}) as { videoBase64?: string };
+      if (!videoBase64 || typeof videoBase64 !== 'string') {
+        res.status(400).json({ error: 'Vídeo não informado.' });
+        return;
+      }
+
+      const cleaned = videoBase64.replace(/^data:video\/[a-zA-Z0-9+.-]+;base64,/, '').trim();
+      const videoBuf = Buffer.from(cleaned, 'base64');
+      const frameBuf = await extractFrameFromVideoBuffer(videoBuf);
+      const frameOut = await sharp(frameBuf)
+        .resize(1080, 1350, { fit: 'cover', position: 'center' })
+        .jpeg({ quality: 92 })
+        .toBuffer();
+
+      res.json({
+        ok: true,
+        dataUrl: `data:image/jpeg;base64,${frameOut.toString('base64')}`,
+      });
+    } catch (err) {
+      console.error('[API /api/exp/media/extract-frame] Error:', err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Falha ao extrair quadro do vídeo.',
+      });
+    }
+  });
+
+  // Apply demonic styling filter (crimson vignette, contrast, runic border) to an uploaded image
+  app.post('/api/exp/media/demonic-filter', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+
+    try {
+      const { imageBase64 } = (req.body || {}) as { imageBase64?: string };
+      if (!imageBase64 || typeof imageBase64 !== 'string') {
+        res.status(400).json({ error: 'Imagem não informada.' });
+        return;
+      }
+
+      const cleaned = imageBase64.replace(/^data:image\/[a-zA-Z0-9+.-]+;base64,/, '').trim();
+      const imgBuf = Buffer.from(cleaned, 'base64');
+      const filteredBuf = await applyDemonicFilterToImage(imgBuf);
+
+      res.json({
+        ok: true,
+        dataUrl: `data:image/jpeg;base64,${filteredBuf.toString('base64')}`,
+      });
+    } catch (err) {
+      console.error('[API /api/exp/media/demonic-filter] Error:', err);
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Falha ao aplicar filtro demoníaco.',
+      });
+    }
+  });
+
+  // Russian music catalog for EXP Carousels
+  app.get('/api/exp/music/russian', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+
+    try {
+      const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+      const tracks = await listRussianMusicTracks(14, refresh);
+      res.json({ tracks });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Não foi possível carregar as músicas russas.',
+      });
+    }
+  });
+
+  // 100% Web Studio: Preview all 8 framed carousel slides + suggested Russian track
+  app.post('/api/exp/studio/preview', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+
+    try {
+      const body = (req.body || {}) as {
+        title?: string;
+        information?: string;
+        imagesBase64?: unknown;
+        additionalText?: string;
+        insultText?: string;
+        closingText?: string;
+        watermarkText?: string;
+        theme?: 'demonic' | 'gallery';
+        audioMode?: 'auto' | 'custom';
+        selectedAudioTrack?: ExpAudioTrackMeta | null;
+      };
+
+      const title = (body.title || '').trim();
+      const information = (body.information || '').trim();
+      if (title.length < 2) {
+        res.status(400).json({ error: 'Informe o 1. Título da exposição (mínimo 2 caracteres).' });
+        return;
+      }
+      if (information.length < 3) {
+        res.status(400).json({ error: 'Informe o bloco 2. Informações (mínimo 3 caracteres).' });
+        return;
+      }
+
+      const privacy = validateExpNoPrivateData({
+        title,
+        information,
+        additionalText: body.additionalText,
+        insultText: body.insultText,
+        closingText: body.closingText,
+        watermarkText: body.watermarkText,
+      });
+      if (!privacy.ok) {
+        res.status(400).json({ error: privacy.reason });
+        return;
+      }
+
+      const imageBuffers = await decodeStudioMedia(body.imagesBase64);
+      const nextExpNumber = getNextPreviewExpNumber();
+      const theme = body.theme || 'demonic';
+      const watermarkText = (body.watermarkText || (theme === 'demonic' ? '@5573satan' : '@5573exp')).trim();
+      const { slideBuffers, slideLabels } = await generateStudioCarouselSlides({
+        expNumber: nextExpNumber,
+        title,
+        information,
+        imageBuffers,
+        additionalText: (body.additionalText || '').trim(),
+        insultText: (body.insultText || '').trim(),
+        closingText: (body.closingText || '').trim(),
+        watermarkText,
+        theme,
+      });
+
+      let suggestedAudioTrack: ExpAudioTrackMeta | null =
+        body.audioMode === 'custom' && body.selectedAudioTrack?.previewUrl
+          ? body.selectedAudioTrack
+          : null;
+
+      if (!suggestedAudioTrack) {
+        const catalog = await listRussianMusicTracks(12, false).catch(() => []);
+        if (catalog.length > 0) {
+          const picked = catalog[crypto.randomInt(0, catalog.length)];
+          suggestedAudioTrack = {
+            id: picked.id,
+            artist: picked.artist,
+            title: picked.title,
+            previewUrl: picked.previewUrl,
+          };
+        }
+      }
+
+      res.json({
+        slides: slideBuffers.map((buf, idx) => ({
+          index: idx + 1,
+          label: slideLabels[idx] || `Slide ${idx + 1}`,
+          dataUrl: `data:image/jpeg;base64,${buf.toString('base64')}`,
+        })),
+        nextExpNumber,
+        nextExpCode: formatExpCode(nextExpNumber),
+        suggestedAudioTrack,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Erro ao gerar prévia das molduras do carrossel.',
+      });
+    }
+  });
+
+  // 100% Web Studio: Create EXP carousel (1-8 ordered framed slides + different Russian music) & optionally publish
+  app.post('/api/exp/studio/create', async (req, res) => {
+    const auth = getSessionFromRequest(req);
+    if (!auth) {
+      res.status(401).json({ error: 'Usuário não autenticado.' });
+      return;
+    }
+
+    try {
+      const body = (req.body || {}) as {
+        guildId?: string;
+        title?: string;
+        information?: string;
+        imagesBase64?: unknown;
+        additionalText?: string;
+        insultText?: string;
+        closingText?: string;
+        watermarkText?: string;
+        theme?: 'demonic' | 'gallery';
+        audioMode?: 'auto' | 'custom';
+        selectedAudioTrack?: ExpAudioTrackMeta | null;
+        carouselMode?: CarouselPublishMode;
+        publishNow?: boolean;
+        draftOnly?: boolean;
+        accountId?: string;
+        caption?: string;
+        hashtags?: string[] | string;
+      };
+
+      const title = (body.title || '').trim();
+      const information = (body.information || '').trim();
+      if (title.length < 2) {
+        res.status(400).json({ error: 'Informe o 1. Título da exposição (mínimo 2 caracteres).' });
+        return;
+      }
+      if (information.length < 3) {
+        res.status(400).json({ error: 'Informe o bloco 2. Informações (mínimo 3 caracteres).' });
+        return;
+      }
+
+      const privacy = validateExpNoPrivateData({
+        title,
+        information,
+        additionalText: body.additionalText,
+        insultText: body.insultText,
+        closingText: body.closingText,
+        watermarkText: body.watermarkText,
+      });
+      if (!privacy.ok) {
+        res.status(400).json({ error: privacy.reason });
+        return;
+      }
+
+      let resolvedGuildId = 'web-studio';
+      let resolvedGuildName = 'Estúdio Web EXP';
+
+      if (body.guildId && body.guildId !== 'web-studio') {
+        const activeSession = await refreshAccessTokenIfNeeded(auth.sessionId, auth.session, res);
+        if (!activeSession) {
+          res.status(401).json({ error: 'Sessão expirada.' });
+          return;
+        }
+        const guildsResult = await fetchUserGuildsCached(auth.sessionId, activeSession, false);
+        const targetGuild = (guildsResult.guilds ?? []).find(
+          (g) => g.id === body.guildId && hasAdminPermission(g),
+        );
+        if (!targetGuild) {
+          res.status(403).json({ error: 'Sem permissão administrativa neste servidor.' });
+          return;
+        }
+        resolvedGuildId = targetGuild.id;
+        resolvedGuildName = targetGuild.name;
+      }
+
+      const imageBuffers = await decodeStudioMedia(body.imagesBase64);
+      const additionalText = (body.additionalText || '').trim();
+      const insultText = (body.insultText || '').trim();
+      const closingText = (body.closingText || '').trim();
+      const theme = body.theme || 'demonic';
+      const watermarkText = (body.watermarkText || (theme === 'demonic' ? '@5573satan' : '@5573exp')).trim();
+      const carouselPublishMode: CarouselPublishMode =
+        body.carouselMode === 'photo_carousel' ? 'photo_carousel' : 'video_slideshow';
+
+      const initialRecord = createExpRecord({
+        guildId: resolvedGuildId,
+        guildName: resolvedGuildName,
+        requesterId: auth.session.user.id,
+        requesterTag: auth.session.user.globalName || auth.session.user.username,
+        involvedName: '',
+        description: title,
+        whatHappened: information,
+        whyWrong: additionalText,
+        additionalInsults: insultText,
+        title,
+        information,
+        additionalText,
+        insultText,
+        closingText,
+        watermarkText,
+        audioTrack: null,
+        carouselPublishMode,
+        mediaLinks: [],
+        otherLinks: [],
+        personPhotoFile: null,
+        proofFiles: [],
+        format: 'carousel',
+        status: 'accepted',
+        expNumber: null,
+        expCode: null,
+        caption: null,
+        generatedFiles: [],
+        handledById: auth.session.user.id,
+        handledByTag: auth.session.user.globalName || auth.session.user.username,
+        handledAt: new Date().toISOString(),
+        tiktokPublishId: null,
+        tiktokPublishMode: null,
+        tiktokStatusText: null,
+        tiktokError: null,
+      });
+
+      const allocation = allocateUniqueExpNumber(initialRecord.id);
+      const mediaDir = getExpMediaDir(initialRecord.id);
+
+      const savedSourceProofs: string[] = [];
+      for (let i = 0; i < imageBuffers.length; i++) {
+        const srcName = `source-studio-${i + 1}.jpg`;
+        const srcOut = await sharp(imageBuffers[i]).jpeg({ quality: 92 }).toBuffer();
+        fs.writeFileSync(path.resolve(mediaDir, srcName), srcOut);
+        savedSourceProofs.push(srcName);
+      }
+
+      const { slideBuffers } = await generateStudioCarouselSlides({
+        expNumber: allocation.expNumber,
+        title,
+        information,
+        imageBuffers,
+        additionalText,
+        insultText,
+        closingText,
+        watermarkText,
+        theme,
+      });
+
+      const generatedFiles: string[] = [];
+      for (let i = 0; i < slideBuffers.length; i++) {
+        const fname = `slide-${i + 1}.jpg`;
+        fs.writeFileSync(path.resolve(mediaDir, fname), slideBuffers[i]);
+        generatedFiles.push(fname);
+      }
+
+      const selectedTrack = await selectRussianTrackForPost(
+        body.audioMode === 'custom' && body.selectedAudioTrack ? body.selectedAudioTrack : null,
+      ).catch(() => null);
+
+      const trackMeta: ExpAudioTrackMeta | null = selectedTrack
+        ? {
+            id: selectedTrack.id,
+            artist: selectedTrack.artist,
+            title: selectedTrack.title,
+            previewUrl: selectedTrack.previewUrl,
+          }
+        : body.selectedAudioTrack?.artist
+          ? body.selectedAudioTrack
+          : null;
+
+      try {
+        await generateCarouselSlideshowVideo(
+          initialRecord.id,
+          generatedFiles,
+          selectedTrack?.localPath ?? null,
+        );
+        generatedFiles.push('exp-carousel.mp4');
+      } catch (ffmpegErr) {
+        console.error('[Studio] Falha ao compilar MP4 do carrossel:', ffmpegErr);
+      }
+
+      let finalRecord =
+        updateExpRecord(initialRecord.id, {
+          status: 'accepted',
+          expNumber: allocation.expNumber,
+          expCode: allocation.expCode,
+          caption: allocation.caption,
+          proofFiles: savedSourceProofs,
+          generatedFiles,
+          audioTrack: trackMeta,
+          carouselPublishMode,
+        }) ?? initialRecord;
+
+      let tiktokOutcome: Awaited<ReturnType<typeof publishExpToTikTok>> | null = null;
+      if (body.publishNow) {
+        tiktokOutcome = await publishExpToTikTok(
+          finalRecord,
+          auth.session.user.id,
+          body.draftOnly ? 'inbox_draft' : 'auto',
+          body.accountId,
+          {
+            caption: body.caption,
+            hashtags: body.hashtags,
+            carouselMode: carouselPublishMode,
+          },
+        );
+
+        if (tiktokOutcome.outcome === 'published') {
+          finalRecord =
+            updateExpRecord(finalRecord.id, {
+              status: 'published_tiktok',
+              tiktokPublishId: tiktokOutcome.publishId ?? null,
+              tiktokPublishMode: tiktokOutcome.publishMode ?? null,
+              tiktokStatusText: tiktokOutcome.statusText,
+              tiktokPostUrl: tiktokOutcome.platformPostUrl ?? null,
+              tiktokError: null,
+            }) ?? finalRecord;
+        } else if (tiktokOutcome.outcome === 'inbox_draft') {
+          finalRecord =
+            updateExpRecord(finalRecord.id, {
+              status: 'tiktok_inbox',
+              tiktokPublishId: tiktokOutcome.publishId ?? null,
+              tiktokPublishMode: 'inbox_draft',
+              tiktokStatusText: tiktokOutcome.statusText,
+              tiktokPostUrl: tiktokOutcome.platformPostUrl ?? null,
+              tiktokError: null,
+            }) ?? finalRecord;
+        } else {
+          finalRecord =
+            updateExpRecord(finalRecord.id, {
+              status: 'tiktok_error',
+              tiktokPublishId: tiktokOutcome.publishId ?? null,
+              tiktokStatusText: tiktokOutcome.statusText,
+              tiktokError: tiktokOutcome.error ?? tiktokOutcome.statusText,
+            }) ?? finalRecord;
+        }
+      }
+
+      res.json({
+        ok: true,
+        record: finalRecord,
+        tiktokOutcome,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Erro ao criar carrossel EXP.',
+      });
+    }
+  });
+
   app.post('/api/exp/preview', async (req, res) => {
     const auth = getSessionFromRequest(req);
     if (!auth) {
@@ -1619,6 +2311,7 @@ async function startServer(): Promise<void> {
       description?: string;
       whatHappened?: string;
       whyWrong?: string;
+      additionalInsults?: string;
       mediaLinks?: string;
       otherLinks?: string;
       format?: string;
@@ -1641,6 +2334,8 @@ async function startServer(): Promise<void> {
       description: (body.description || '').trim(),
       whatHappened: (body.whatHappened || '').trim(),
       whyWrong: (body.whyWrong || '').trim(),
+      additionalInsults: (body.additionalInsults || '').trim(),
+      mediaLinks,
       mediaLinksCount: mediaLinks.length,
       otherLinksCount: otherLinks.length,
       format,
@@ -1651,6 +2346,97 @@ async function startServer(): Promise<void> {
       nextExpNumber,
       nextExpCode: formatExpCode(nextExpNumber),
     });
+  });
+
+  // Publish EXP record (supports both web-studio records and Discord server records)
+  app.post('/api/exp/:expId/publish-tiktok', async (req, res) => {
+    try {
+      const auth = getSessionFromRequest(req);
+      if (!auth) {
+        res.status(401).json({ error: 'Usuário não autenticado.' });
+        return;
+      }
+
+      const record = getExpRecord(req.params.expId);
+      if (!record) {
+        res.status(404).json({ error: 'Exposição não encontrada.' });
+        return;
+      }
+
+      if (record.guildId === 'web-studio') {
+        if (record.requesterId !== auth.session.user.id) {
+          res.status(403).json({ error: 'Sem permissão para publicar esta exposição.' });
+          return;
+        }
+      } else {
+        const authorized = await authorizeGuildAdmin(req, res, record.guildId);
+        if (!authorized) return;
+      }
+
+      if (record.generatedFiles.length === 0) {
+        res.status(400).json({ error: 'O conteúdo desta exposição ainda não foi gerado.' });
+        return;
+      }
+
+      const body = (req.body || {}) as {
+        mode?: TikTokPublishMode;
+        accountId?: string;
+        caption?: string;
+        hashtags?: string[] | string;
+        privacyLevel?: TikTokPrivacyLevel;
+        carouselMode?: CarouselPublishMode;
+      };
+      const mode: TikTokPublishMode =
+        body.mode === 'inbox_draft' || body.mode === 'direct_private' || body.mode === 'direct_public'
+          ? body.mode
+          : 'auto';
+
+      const tiktokOwner = getTikTokConnection(auth.session.user.id, body.accountId)
+        ? auth.session.user.id
+        : null;
+
+      const outcome = await publishExpToTikTok(record, tiktokOwner, mode, body.accountId, {
+        caption: body.caption,
+        hashtags: body.hashtags,
+        privacyLevel: body.privacyLevel,
+        carouselMode: body.carouselMode,
+      });
+
+      if (outcome.outcome === 'published') {
+        updateExpRecord(record.id, {
+          status: 'published_tiktok',
+          tiktokPublishId: outcome.publishId ?? null,
+          tiktokPublishMode: outcome.publishMode ?? null,
+          tiktokStatusText: outcome.statusText,
+          tiktokPostUrl: outcome.platformPostUrl ?? null,
+          tiktokError: null,
+        });
+      } else if (outcome.outcome === 'inbox_draft') {
+        updateExpRecord(record.id, {
+          status: 'tiktok_inbox',
+          tiktokPublishId: outcome.publishId ?? null,
+          tiktokPublishMode: 'inbox_draft',
+          tiktokStatusText: outcome.statusText,
+          tiktokPostUrl: outcome.platformPostUrl ?? null,
+          tiktokError: null,
+        });
+      } else {
+        updateExpRecord(record.id, {
+          status: 'tiktok_error',
+          tiktokPublishId: outcome.publishId ?? record.tiktokPublishId ?? null,
+          tiktokStatusText: outcome.statusText,
+          tiktokError: outcome.error ?? outcome.statusText,
+        });
+      }
+
+      res.status(outcome.outcome === 'error' || outcome.outcome === 'not_connected' ? 400 : 200).json(
+        outcome,
+      );
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Erro ao publicar exposição no TikTok.',
+      });
+    }
   });
 
   app.post('/api/guilds/:guildId/exp/:expId/publish-tiktok', async (req, res) => {
@@ -1669,17 +2455,29 @@ async function startServer(): Promise<void> {
         return;
       }
 
-      const body = (req.body || {}) as { mode?: TikTokPublishMode; accountId?: string };
+      const body = (req.body || {}) as {
+        mode?: TikTokPublishMode;
+        accountId?: string;
+        caption?: string;
+        hashtags?: string[] | string;
+        privacyLevel?: TikTokPrivacyLevel;
+        carouselMode?: CarouselPublishMode;
+      };
       const mode: TikTokPublishMode =
         body.mode === 'inbox_draft' || body.mode === 'direct_private' || body.mode === 'direct_public'
           ? body.mode
           : 'auto';
 
-      const tiktokOwner = getTikTokConnection(authorized.session.user.id)
+      const tiktokOwner = getTikTokConnection(authorized.session.user.id, body.accountId)
         ? authorized.session.user.id
         : null;
 
-      const outcome = await publishExpToTikTok(record, tiktokOwner, mode, body.accountId);
+      const outcome = await publishExpToTikTok(record, tiktokOwner, mode, body.accountId, {
+        caption: body.caption,
+        hashtags: body.hashtags,
+        privacyLevel: body.privacyLevel,
+        carouselMode: body.carouselMode,
+      });
 
       if (outcome.outcome === 'published') {
         updateExpRecord(record.id, {
@@ -1687,6 +2485,7 @@ async function startServer(): Promise<void> {
           tiktokPublishId: outcome.publishId ?? null,
           tiktokPublishMode: outcome.publishMode ?? null,
           tiktokStatusText: outcome.statusText,
+          tiktokPostUrl: outcome.platformPostUrl ?? null,
           tiktokError: null,
         });
       } else if (outcome.outcome === 'inbox_draft') {
@@ -1695,23 +2494,21 @@ async function startServer(): Promise<void> {
           tiktokPublishId: outcome.publishId ?? null,
           tiktokPublishMode: 'inbox_draft',
           tiktokStatusText: outcome.statusText,
+          tiktokPostUrl: outcome.platformPostUrl ?? null,
           tiktokError: null,
-        });
-      } else if (outcome.outcome === 'awaiting_confirmation') {
-        updateExpRecord(record.id, {
-          status: 'awaiting_tiktok_confirmation',
-          tiktokStatusText: outcome.statusText,
-          tiktokError: outcome.error ?? null,
         });
       } else {
         updateExpRecord(record.id, {
           status: 'tiktok_error',
+          tiktokPublishId: outcome.publishId ?? record.tiktokPublishId ?? null,
           tiktokStatusText: outcome.statusText,
           tiktokError: outcome.error ?? outcome.statusText,
         });
       }
 
-      res.json(outcome);
+      res.status(outcome.outcome === 'error' || outcome.outcome === 'not_connected' ? 400 : 200).json(
+        outcome,
+      );
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Erro ao publicar exposição no TikTok.',

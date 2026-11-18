@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowLeft,
@@ -9,8 +9,9 @@ import {
   Menu,
   Plus,
   RefreshCw,
+  RotateCcw,
+  Send,
   ShieldCheck,
-  Sparkles,
   Star,
   Trash2,
   User,
@@ -20,9 +21,9 @@ import { apiFetch } from '../lib/api';
 import type {
   DiscordUser,
   TikTokAccountInfo,
-  TikTokLoginResult,
-  TikTokQrState,
   TikTokStatusResponse,
+  ZernioPostHistoryItem,
+  ZernioPostStatus,
 } from '../types';
 
 interface TikTokConnectionViewProps {
@@ -31,10 +32,10 @@ interface TikTokConnectionViewProps {
   tiktokStatus: TikTokStatusResponse | null;
   accounts?: TikTokAccountInfo[];
   activeAccountId?: string | null;
-  qrState: TikTokQrState | null;
   loading: boolean;
-  connecting: boolean;
   error: string | null;
+  notice?: string | null;
+  onClearNotice?: () => void;
   onOpenDrawer: () => void;
   onBackDashboard: () => void;
   onLoginDiscord: () => void;
@@ -45,6 +46,22 @@ interface TikTokConnectionViewProps {
   onRefreshStatus: () => void;
 }
 
+function getPostStatusBadge(status: ZernioPostStatus): { label: string; classes: string } {
+  switch (status) {
+    case 'published':
+      return { label: 'Publicado', classes: 'bg-emerald-50 text-emerald-800 border-emerald-200' };
+    case 'draft':
+      return { label: 'Rascunho', classes: 'bg-slate-100 text-slate-700 border-slate-200' };
+    case 'partial':
+      return { label: 'Parcial', classes: 'bg-amber-50 text-amber-800 border-amber-200' };
+    case 'failed':
+      return { label: 'Erro', classes: 'bg-red-50 text-red-700 border-red-200' };
+    case 'processing':
+    default:
+      return { label: 'Processando', classes: 'bg-amber-50 text-amber-800 border-amber-200' };
+  }
+}
+
 export function TikTokConnectionView({
   authenticated,
   user,
@@ -53,6 +70,8 @@ export function TikTokConnectionView({
   activeAccountId,
   loading,
   error,
+  notice,
+  onClearNotice,
   onOpenDrawer,
   onBackDashboard,
   onLoginDiscord,
@@ -73,7 +92,7 @@ export function TikTokConnectionView({
 
   const accountsMap = new Map<string, TikTokAccountInfo>();
   for (const acc of rawAccountsList) {
-    const key = acc.id || acc.accountKey || acc.username;
+    const key = acc.id || acc.zernioAccountId || acc.username;
     if (key && !accountsMap.has(key)) {
       accountsMap.set(key, acc);
     }
@@ -89,6 +108,7 @@ export function TikTokConnectionView({
 
   const [showConnectPanel, setShowConnectPanel] = useState(accountsList.length === 0);
   const [connectingZernio, setConnectingZernio] = useState(false);
+  const [pendingAuthUrl, setPendingAuthUrl] = useState<string | null>(null);
   const [zernioError, setZernioError] = useState<string | null>(null);
 
   // Account operations state
@@ -97,18 +117,66 @@ export function TikTokConnectionView({
   const [settingDefaultId, setSettingDefaultId] = useState<string | null>(null);
   const [deletingAccountId, setDeletingAccountId] = useState<string | null>(null);
 
-  // Global test publish
-  const [publishingTest, setPublishingTest] = useState(false);
+  // Account feedback state
   const [verifyFeedback, setVerifyFeedback] = useState<{
     type: 'success' | 'error';
     text: string;
   } | null>(null);
 
+  // EXP Post history state
+  const [postHistory, setPostHistory] = useState<ZernioPostHistoryItem[]>([]);
+  const [loadingPosts, setLoadingPosts] = useState(false);
+  const [checkingPostId, setCheckingPostId] = useState<string | null>(null);
+  const [retryingPostId, setRetryingPostId] = useState<string | null>(null);
+
+  const oauthPollTimerRef = useRef<number | null>(null);
+
+  const stopOAuthPolling = useCallback(() => {
+    if (oauthPollTimerRef.current !== null) {
+      window.clearInterval(oauthPollTimerRef.current);
+      oauthPollTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => stopOAuthPolling();
+  }, [stopOAuthPolling]);
+
+  const loadPostHistory = useCallback(async () => {
+    if (!authenticated) return;
+    setLoadingPosts(true);
+    try {
+      const resp = await apiFetch('/api/tiktok/posts');
+      if (resp.ok) {
+        const data = (await resp.json()) as { posts?: ZernioPostHistoryItem[] };
+        setPostHistory(Array.isArray(data.posts) ? data.posts : []);
+      }
+    } catch {
+      // Non-blocking
+    } finally {
+      setLoadingPosts(false);
+    }
+  }, [authenticated]);
+
+  useEffect(() => {
+    if (authenticated) {
+      void loadPostHistory();
+    } else {
+      setPostHistory([]);
+    }
+  }, [authenticated, loadPostHistory]);
+
   const isConnected = accountsList.length > 0;
+  const isZernioConfigured = tiktokStatus?.configured ?? false;
 
   const handleConnectZernio = async () => {
+    stopOAuthPolling();
+    onClearNotice?.();
     setConnectingZernio(true);
     setZernioError(null);
+    setPendingAuthUrl(null);
+    setVerifyFeedback(null);
+
     try {
       const resp = await apiFetch('/api/tiktok/accounts/connect', {
         method: 'POST',
@@ -118,32 +186,80 @@ export function TikTokConnectionView({
       const data = (await resp.json().catch(() => ({}))) as {
         ok?: boolean;
         url?: string;
+        state?: string;
         error?: string;
-        account?: TikTokAccountInfo;
       };
 
-      if (!resp.ok || !data.ok) {
+      if (!resp.ok || !data.ok || !data.url) {
         setZernioError(data.error || 'Não foi possível iniciar a conexão OAuth com o Zernio.');
-      } else if (data.url) {
-        window.location.href = data.url;
+        setConnectingZernio(false);
+        return;
+      }
+
+      setPendingAuthUrl(data.url);
+      const popup = window.open(data.url, 'zernio_tiktok_oauth', 'width=600,height=760');
+      if (!popup) {
+        // Fallback: browser blocked popup inside iframe — keep direct link visible and try _blank
+        setZernioError(
+          'Pop-up bloqueado pelo navegador. Clique no botão "Abrir página de autorização do TikTok" abaixo.',
+        );
+      }
+
+      if (data.state) {
+        const stateToken = data.state;
+        const startedAt = Date.now();
+        oauthPollTimerRef.current = window.setInterval(() => {
+          if (Date.now() - startedAt > 5 * 60 * 1000) {
+            stopOAuthPolling();
+            setConnectingZernio(false);
+            return;
+          }
+          void (async () => {
+            try {
+              const pollResp = await apiFetch(
+                `/api/tiktok/oauth/poll?state=${encodeURIComponent(stateToken)}`,
+              );
+              if (!pollResp.ok) return;
+              const pollData = (await pollResp.json()) as {
+                completed: boolean;
+                status?: 'success' | 'error';
+                account?: TikTokAccountInfo | null;
+                error?: string | null;
+              };
+              if (!pollData.completed) return;
+
+              stopOAuthPolling();
+              setConnectingZernio(false);
+              setPendingAuthUrl(null);
+
+              if (pollData.status === 'success') {
+                setShowConnectPanel(false);
+                setVerifyFeedback({
+                  type: 'success',
+                  text: pollData.account?.username
+                    ? `Conta @${pollData.account.username} conectada com sucesso via Zernio OAuth!`
+                    : 'Conta TikTok conectada com sucesso via Zernio OAuth!',
+                });
+                onRefreshStatus();
+              } else {
+                setZernioError(pollData.error || 'Autorização recusada ou expirada.');
+              }
+            } catch {
+              // Retry on next interval
+            }
+          })();
+        }, 1500);
       } else {
-        // Connected successfully (simulation mode)
-        await onRefreshStatus();
-        setShowConnectPanel(false);
-        setVerifyFeedback({
-          type: 'success',
-          text: 'Conta TikTok conectada com sucesso via Zernio API!',
-        });
+        setConnectingZernio(false);
       }
     } catch (err) {
       setZernioError(err instanceof Error ? err.message : 'Falha na conexão com Zernio.');
-    } finally {
       setConnectingZernio(false);
     }
   };
 
   const handleSelectDefault = async (account: TikTokAccountInfo) => {
-    const id = account.id || account.accountKey || account.username;
+    const id = account.id || account.zernioAccountId || account.username;
     if (!id || !onSelectAccount) return;
     setSettingDefaultId(id);
     try {
@@ -163,7 +279,7 @@ export function TikTokConnectionView({
   };
 
   const handleVerifyAccount = async (account: TikTokAccountInfo) => {
-    const id = account.id || account.accountKey || account.username;
+    const id = account.id || account.zernioAccountId || account.username;
     if (!id) return;
     setVerifyingAccountId(id);
     setVerifyFeedback(null);
@@ -174,19 +290,19 @@ export function TikTokConnectionView({
         if (res.valid) {
           setVerifyFeedback({
             type: 'success',
-            text: `Sessão da conta @${account.username} verificada e ativa no Zernio!`,
+            text: `Autorização da conta @${account.username} ativa e validada no Zernio!`,
           });
         } else {
           setVerifyFeedback({
             type: 'error',
-            text: res.reason || `Sessão expirada para @${account.username}. Reconecte via Zernio.`,
+            text: res.reason || `Autorização expirada para @${account.username}. Reconecte via Zernio.`,
           });
         }
       }
     } catch {
       setVerifyFeedback({
         type: 'error',
-        text: 'Erro de comunicação ao verificar conta.',
+        text: 'Erro de comunicação ao verificar conta no Zernio.',
       });
     } finally {
       setVerifyingAccountId(null);
@@ -194,7 +310,7 @@ export function TikTokConnectionView({
   };
 
   const handleDeleteAccount = async (account: TikTokAccountInfo) => {
-    const id = account.id || account.accountKey || account.username;
+    const id = account.id || account.zernioAccountId || account.username;
     if (!id) return;
     const confirmName = account.displayName || `@${account.username}`;
     if (!window.confirm(`Deseja realmente desconectar a conta ${confirmName}?`)) {
@@ -221,40 +337,50 @@ export function TikTokConnectionView({
     }
   };
 
-  const handlePublishTestPost = async () => {
-    setPublishingTest(true);
-    setVerifyFeedback(null);
+  const handleCheckPostStatus = async (postId: string) => {
+    setCheckingPostId(postId);
     try {
-      const resp = await apiFetch('/api/tiktok/test-publish', { method: 'POST' });
+      const resp = await apiFetch(`/api/tiktok/posts/${encodeURIComponent(postId)}/status`);
       const data = (await resp.json().catch(() => ({}))) as {
-        outcome?: string;
-        statusText?: string;
+        ok?: boolean;
         error?: string;
-        trackArtist?: string | null;
-        trackTitle?: string | null;
       };
-      const trackNote =
-        data.trackArtist && data.trackTitle
-          ? ` Trilha: ${data.trackArtist} — ${data.trackTitle}.`
-          : '';
-      if (resp.ok && data.outcome === 'published') {
+      if (!resp.ok || !data.ok) {
         setVerifyFeedback({
-          type: 'success',
-          text: `${data.statusText || 'Publicação de teste enviada via Zernio!'}${trackNote}`,
+          type: 'error',
+          text: data.error || 'Não foi possível consultar o status da publicação.',
+        });
+      }
+      await loadPostHistory();
+    } finally {
+      setCheckingPostId(null);
+    }
+  };
+
+  const handleRetryPost = async (postId: string) => {
+    setRetryingPostId(postId);
+    try {
+      const resp = await apiFetch(`/api/tiktok/posts/${encodeURIComponent(postId)}/retry`, {
+        method: 'POST',
+      });
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+      };
+      if (!resp.ok || !data.ok) {
+        setVerifyFeedback({
+          type: 'error',
+          text: data.error || 'Não foi possível reenviar a publicação.',
         });
       } else {
         setVerifyFeedback({
-          type: 'error',
-          text: `${data.error || data.statusText || 'Falha na publicação de teste.'}${trackNote}`,
+          type: 'success',
+          text: 'Reenvio solicitado ao Zernio com sucesso.',
         });
       }
-    } catch {
-      setVerifyFeedback({
-        type: 'error',
-        text: 'Erro de conexão ao tentar publicar o teste.',
-      });
+      await loadPostHistory();
     } finally {
-      setPublishingTest(false);
+      setRetryingPostId(null);
     }
   };
 
@@ -324,7 +450,7 @@ export function TikTokConnectionView({
               </span>
             </div>
             <p className="text-sm text-slate-500 mt-1">
-              Conecte sua conta do TikTok de forma segura via Zernio OAuth. O bot publicará as ocorrências aprovadas automaticamente no canal #exp.
+              Conecte contas TikTok via OAuth do Zernio. Todas as publicações são realizadas exclusivamente pelo sistema EXP após aprovação administrativa.
             </p>
           </div>
 
@@ -338,33 +464,61 @@ export function TikTokConnectionView({
               <span>Conectar TikTok</span>
             </button>
 
-            {isConnected && (
-              <button
-                type="button"
-                onClick={() => void handlePublishTestPost()}
-                disabled={publishingTest || loading}
-                title="Publicar ocorrência de teste com áudio no TikTok via Zernio"
-                className="min-h-[38px] px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-50"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
-                <span>{publishingTest ? 'Publicando...' : 'Publicar Teste'}</span>
-              </button>
-            )}
-
             <button
               type="button"
-              onClick={onRefreshStatus}
-              disabled={loading}
+              onClick={() => {
+                onRefreshStatus();
+                void loadPostHistory();
+              }}
+              disabled={loading || loadingPosts}
               className="min-h-[38px] px-3.5 py-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors disabled:opacity-50"
             >
               <RefreshCw
-                className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`}
+                className={`w-3.5 h-3.5 ${loading || loadingPosts ? 'animate-spin' : ''}`}
                 aria-hidden="true"
               />
               <span>Atualizar</span>
             </button>
           </div>
         </div>
+
+        {/* ZERNIO_API_KEY configuration notice */}
+        {tiktokStatus && !isZernioConfigured && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 bg-amber-50 border border-amber-200 rounded-xl px-5 py-3.5 text-sm text-amber-900"
+          >
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <strong>ZERNIO_API_KEY não configurada no servidor.</strong> Defina a variável de ambiente{' '}
+              <code className="font-mono text-xs bg-amber-100 px-1.5 py-0.5 rounded">ZERNIO_API_KEY</code>{' '}
+              no backend para ativar a conexão OAuth e a publicação de vídeos.
+            </div>
+          </div>
+        )}
+
+        {/* Redirect / OAuth Notice */}
+        {notice && (
+          <div
+            role="status"
+            className="flex items-center justify-between gap-2.5 bg-emerald-50 border border-emerald-200 rounded-xl px-5 py-3.5 text-sm text-emerald-800"
+          >
+            <div className="flex items-center gap-2.5">
+              <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>{notice}</span>
+            </div>
+            {onClearNotice && (
+              <button
+                type="button"
+                onClick={onClearNotice}
+                aria-label="Fechar aviso"
+                className="text-emerald-700 hover:text-emerald-900 p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Global Error Banner */}
         {error && (
@@ -377,7 +531,7 @@ export function TikTokConnectionView({
           </div>
         )}
 
-        {/* Verify Feedback Banner */}
+        {/* Verify / Publish Feedback Banner */}
         {verifyFeedback && (
           <div
             role={verifyFeedback.type === 'error' ? 'alert' : 'status'}
@@ -415,9 +569,7 @@ export function TikTokConnectionView({
           </div>
         ) : (
           <div className="space-y-6">
-            {/* ========================================================= */}
-            {/* 1. INDICADOR DE CONEXÃO & RESUMO GERAL                    */}
-            {/* ========================================================= */}
+            {/* 1. Estado da Conexão */}
             <div className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 shadow-sm">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="space-y-1">
@@ -431,7 +583,7 @@ export function TikTokConnectionView({
                         <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
                       </span>
                       <span className="text-base font-semibold text-emerald-800">
-                        {accountsList.length} {accountsList.length === 1 ? 'conta conectada' : 'contas conectadas'} (Zernio Ativo)
+                        {accountsList.length} {accountsList.length === 1 ? 'conta conectada' : 'contas conectadas'} (Zernio OAuth)
                       </span>
                     </div>
                   ) : (
@@ -442,7 +594,7 @@ export function TikTokConnectionView({
                   )}
                   <p className="text-xs text-slate-500">
                     {isConnected
-                      ? 'Autorização OAuth gerenciada pelo Zernio. Vídeos aprovados são publicados na conta padrão selecionada.'
+                      ? 'Autorização OAuth gerenciada pelo Zernio. Vídeos aprovados são encaminhados para a conta selecionada.'
                       : 'Conecte sua conta TikTok através do fluxo OAuth seguro do Zernio.'}
                   </p>
                 </div>
@@ -460,9 +612,7 @@ export function TikTokConnectionView({
               </div>
             </div>
 
-            {/* ========================================================= */}
-            {/* 2. LISTA DE CONTAS CONECTADAS                            */}
-            {/* ========================================================= */}
+            {/* 2. Lista de Contas Conectadas */}
             <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-4 shadow-sm">
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-2">
@@ -475,7 +625,7 @@ export function TikTokConnectionView({
                 </div>
                 {accountsList.length > 0 && (
                   <span className="text-xs text-slate-500 hidden sm:inline">
-                    Disponíveis no seletor de publicação de ocorrências (EXP)
+                    Utilizadas automaticamente nas publicações do sistema #exp
                   </span>
                 )}
               </div>
@@ -490,7 +640,7 @@ export function TikTokConnectionView({
                       Nenhuma conta TikTok conectada
                     </h3>
                     <p className="text-xs text-slate-500 max-w-sm mx-auto">
-                      Conecte sua conta utilizando o botão abaixo para iniciar o OAuth do Zernio.
+                      Conecte sua conta clicando no botão abaixo para autorizar via OAuth do Zernio.
                     </p>
                   </div>
                   <button
@@ -505,12 +655,12 @@ export function TikTokConnectionView({
               ) : (
                 <div className="space-y-3">
                   {accountsList.map((acc) => {
-                    const id = acc.id || acc.accountKey || acc.username;
+                    const id = acc.id || acc.zernioAccountId || acc.username;
                     const isDefault = acc.isDefault || id === currentActiveId;
                     const isValid =
                       accountValidity[id] !== undefined
                         ? accountValidity[id]
-                        : acc.status !== 'expired';
+                        : acc.status === 'connected';
                     const isVerifying = verifyingAccountId === id;
                     const isSettingDefault = settingDefaultId === id;
                     const isDeleting = deletingAccountId === id;
@@ -525,7 +675,6 @@ export function TikTokConnectionView({
                         }`}
                       >
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                          {/* Account details */}
                           <div className="flex items-start sm:items-center gap-3.5 min-w-0">
                             {acc.avatarUrl ? (
                               <img
@@ -566,37 +715,57 @@ export function TikTokConnectionView({
                                   {isValid ? (
                                     <>
                                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                                      <span>Conectado (Zernio OAuth)</span>
+                                      <span>Conectada</span>
                                     </>
                                   ) : (
                                     <>
                                       <AlertCircle className="w-3 h-3 text-amber-600" />
-                                      <span>Autorização Expirada</span>
+                                      <span>
+                                        {acc.status === 'revoked' ? 'Revogada' : 'Autorização Expirada'}
+                                      </span>
                                     </>
                                   )}
                                 </span>
                               </div>
 
-                              <div className="text-[11px] text-slate-500 flex items-center gap-2">
-                                <span>Plataforma: <strong className="text-slate-700">TikTok (Zernio)</strong></span>
+                              <div className="text-[11px] text-slate-500 flex items-center gap-2 flex-wrap">
+                                <span>
+                                  Plataforma: <strong className="text-slate-700">TikTok (Zernio)</strong>
+                                </span>
                                 {acc.connectedAt && (
                                   <>
                                     <span>•</span>
-                                    <span>Conectado em {new Date(acc.connectedAt).toLocaleDateString()}</span>
+                                    <span>
+                                      Conectada em {new Date(acc.connectedAt).toLocaleDateString('pt-BR')}
+                                    </span>
                                   </>
                                 )}
                               </div>
+                              {acc.healthIssues && acc.healthIssues.length > 0 && (
+                                <div className="text-[11px] text-amber-700">
+                                  {acc.healthIssues.join(' · ')}
+                                </div>
+                              )}
                             </div>
                           </div>
 
-                          {/* Action Buttons */}
-                          <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                          <div className="flex flex-wrap items-center gap-2 shrink-0 self-end sm:self-center">
+                            {!isValid && (
+                              <button
+                                type="button"
+                                onClick={() => void handleConnectZernio()}
+                                className="min-h-[34px] px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                                <span>Reconectar</span>
+                              </button>
+                            )}
+
                             {!isDefault && onSelectAccount && (
                               <button
                                 type="button"
                                 onClick={() => void handleSelectDefault(acc)}
                                 disabled={isSettingDefault || isVerifying || isDeleting}
-                                title="Definir esta conta como destino padrão"
                                 className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
                               >
                                 <Star className="w-3.5 h-3.5 text-slate-400" />
@@ -608,20 +777,18 @@ export function TikTokConnectionView({
                               type="button"
                               onClick={() => void handleVerifyAccount(acc)}
                               disabled={isVerifying || isDeleting}
-                              title="Testar a validade da conexão no Zernio"
                               className="min-h-[34px] px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
                             >
                               <ShieldCheck
                                 className={`w-3.5 h-3.5 text-emerald-600 ${isVerifying ? 'animate-spin' : ''}`}
                               />
-                              <span>{isVerifying ? 'Testando...' : 'Testar Conexão'}</span>
+                              <span>{isVerifying ? 'Verificando...' : 'Verificar Status'}</span>
                             </button>
 
                             <button
                               type="button"
                               onClick={() => void handleDeleteAccount(acc)}
                               disabled={isDeleting || isVerifying}
-                              title="Desconectar esta conta"
                               className="min-h-[34px] px-3 py-1.5 rounded-lg border border-red-200 bg-white hover:bg-red-50 text-xs font-medium text-red-700 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -636,9 +803,7 @@ export function TikTokConnectionView({
               )}
             </section>
 
-            {/* ========================================================= */}
-            {/* 3. PAINEL DE CONEXÃO OAUTH ZERNIO                          */}
-            {/* ========================================================= */}
+            {/* 3. Painel OAuth Zernio */}
             {showConnectPanel && (
               <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-8 space-y-6 shadow-sm">
                 <div className="flex items-center justify-between border-b border-slate-200 pb-4">
@@ -647,7 +812,7 @@ export function TikTokConnectionView({
                       Conectar TikTok via Zernio OAuth
                     </h2>
                     <p className="text-xs text-slate-500 mt-0.5">
-                      Clique no botão abaixo para autorizar a conexão com sua conta TikTok através da API oficial do Zernio.
+                      Clique abaixo para iniciar a autorização oficial no TikTok através do Zernio.
                     </p>
                   </div>
                   {accountsList.length > 0 && (
@@ -688,24 +853,160 @@ export function TikTokConnectionView({
                   <button
                     type="button"
                     onClick={() => void handleConnectZernio()}
-                    disabled={connectingZernio}
+                    disabled={connectingZernio || !isZernioConfigured}
                     className="w-full min-h-[44px] px-6 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors shadow-sm"
                   >
                     {connectingZernio ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>Abrindo autorização Zernio...</span>
+                        <span>Aguardando autorização no TikTok...</span>
                       </>
                     ) : (
                       <>
                         <ExternalLink className="w-4 h-4" />
-                        <span>Conectar Conta TikTok com Zernio</span>
+                        <span>Conectar TikTok</span>
                       </>
                     )}
                   </button>
+
+                  {pendingAuthUrl && (
+                    <div className="pt-2">
+                      <a
+                        href={pendingAuthUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-medium text-[#5865F2] hover:underline inline-flex items-center gap-1"
+                      >
+                        <span>Abrir página de autorização do TikTok em nova aba</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  )}
                 </div>
               </section>
             )}
+
+            {/* 4. Histórico de Publicações EXP no TikTok */}
+            <section className="bg-white border border-slate-200 rounded-xl p-5 sm:p-6 space-y-4 shadow-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-bold text-slate-900">
+                    Histórico de Publicações EXP (TikTok)
+                  </h2>
+                  <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded-full">
+                    {postHistory.length}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void loadPostHistory()}
+                  disabled={loadingPosts}
+                  className="text-xs font-medium text-slate-600 hover:text-slate-900 inline-flex items-center gap-1"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingPosts ? 'animate-spin' : ''}`} />
+                  <span>Atualizar lista</span>
+                </button>
+              </div>
+
+              {postHistory.length === 0 ? (
+                <p className="text-xs text-slate-500 py-6 text-center">
+                  Nenhuma publicação do sistema EXP registrada via Zernio até o momento.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {postHistory.map((post) => {
+                    const badge = getPostStatusBadge(post.status);
+                    return (
+                      <div
+                        key={post.id}
+                        className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 space-y-2"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="font-semibold text-slate-900">
+                              @{post.accountUsername}
+                            </span>
+                            {post.expCode && (
+                              <span className="font-mono text-slate-600 bg-white border border-slate-200 px-2 py-0.5 rounded">
+                                {post.expCode}
+                              </span>
+                            )}
+                            <span
+                              className={`text-[11px] font-medium px-2 py-0.5 rounded-md border ${badge.classes}`}
+                            >
+                              {badge.label}
+                            </span>
+                          </div>
+
+                          <span className="text-[11px] text-slate-500 tabular-nums">
+                            {new Date(post.createdAt).toLocaleString('pt-BR')}
+                          </span>
+                        </div>
+
+                        <p className="text-xs text-slate-700 whitespace-pre-line line-clamp-2">
+                          {post.caption || '(Sem legenda)'}
+                        </p>
+
+                        {post.error && (
+                          <div className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                            {post.error}
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                          <span className="text-[11px] font-mono text-slate-500">
+                            ID: {post.zernioPostId}
+                          </span>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            {post.platformPostUrl && (
+                              <a
+                                href={post.platformPostUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1"
+                              >
+                                <Send className="w-3 h-3" />
+                                <span>Ver no TikTok</span>
+                              </a>
+                            )}
+
+                            {!post.zernioPostId.startsWith('fail_') && (
+                              <button
+                                type="button"
+                                onClick={() => void handleCheckPostStatus(post.zernioPostId)}
+                                disabled={checkingPostId === post.zernioPostId}
+                                className="min-h-[30px] px-2.5 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <RefreshCw
+                                  className={`w-3 h-3 ${checkingPostId === post.zernioPostId ? 'animate-spin' : ''}`}
+                                />
+                                <span>Consultar status</span>
+                              </button>
+                            )}
+
+                            {(post.status === 'failed' || post.status === 'partial') &&
+                              !post.zernioPostId.startsWith('fail_') && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleRetryPost(post.zernioPostId)}
+                                  disabled={retryingPostId === post.zernioPostId}
+                                  className="min-h-[30px] px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-medium inline-flex items-center gap-1 disabled:opacity-50"
+                                >
+                                  <RotateCcw
+                                    className={`w-3 h-3 ${retryingPostId === post.zernioPostId ? 'animate-spin' : ''}`}
+                                  />
+                                  <span>Tentar novamente</span>
+                                </button>
+                              )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
           </div>
         )}
       </main>
